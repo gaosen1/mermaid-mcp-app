@@ -13,7 +13,7 @@ Claude Desktop launches this as a local (stdio) MCP server via `~/Library/Applic
   "mcpServers": {
     "mermaid": {
       "command": "node",
-      "args": ["/Users/gaosen/WORKSPACE/mcp-servers/mermaid-mcp-app/dist/main.js"]
+      "args": ["/absolute/path/to/mermaid-mcp-app/dist/main.js"]
     }
   }
 }
