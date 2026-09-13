@@ -1,0 +1,155 @@
+:root {
+  --mermaid-fg: #1a1a1a;
+  --mermaid-bg: #ffffff;
+  --mermaid-border: #d9d9d9;
+  --mermaid-error-bg: #fff3f3;
+  --mermaid-error-border: #e5484d;
+  --mermaid-error-fg: #a4222a;
+  --mermaid-muted: #6b6b6b;
+}
+
+:root[data-theme="dark"] {
+  --mermaid-fg: #e6e6e6;
+  --mermaid-bg: #1e1e1e;
+  --mermaid-border: #3a3a3a;
+  --mermaid-error-bg: #2b1616;
+  --mermaid-error-border: #e5484d;
+  --mermaid-error-fg: #ff8a8a;
+  --mermaid-muted: #9a9a9a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--mermaid-fg);
+  background: transparent;
+}
+
+.mermaid-app {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.status {
+  padding: 12px 4px;
+  color: var(--mermaid-muted);
+  font-size: 13px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 4px;
+  margin-bottom: 6px;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn {
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1;
+  color: var(--mermaid-fg);
+  background: var(--mermaid-bg);
+  border: 1px solid var(--mermaid-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--mermaid-muted);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.zoom-level {
+  min-width: 42px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--mermaid-muted);
+  user-select: none;
+}
+
+.viewport {
+  position: relative;
+  width: 100%;
+  /* Height is set inline by fitToWidth() based on the diagram's own aspect
+     ratio (clamped); this is just a pre-render fallback. */
+  height: 160px;
+  overflow: hidden;
+  border: 1px solid var(--mermaid-border);
+  border-radius: 8px;
+  background: var(--mermaid-bg);
+  cursor: grab;
+  touch-action: none;
+}
+
+.viewport.panning {
+  cursor: grabbing;
+}
+
+.pan-zoom {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  display: inline-block;
+}
+
+.pan-zoom svg {
+  display: block;
+}
+
+.error {
+  border: 1px solid var(--mermaid-error-border);
+  background: var(--mermaid-error-bg);
+  color: var(--mermaid-error-fg);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.error-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.error-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  margin: 0 0 8px;
+}
+
+.error-source {
+  color: var(--mermaid-muted);
+  font-size: 12px;
+}
+
+.error-source pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--mermaid-border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--mermaid-bg);
+}

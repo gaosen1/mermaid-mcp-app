@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Mermaid Viewer</title>
+  </head>
+  <body>
+    <main id="app" class="mermaid-app" aria-live="polite">
+      <div id="status" class="status">Waiting for diagram…</div>
+
+      <div id="toolbar" class="toolbar" hidden>
+        <div class="toolbar-group">
+          <button id="zoom-out" class="btn" type="button" aria-label="缩小">−</button>
+          <span id="zoom-level" class="zoom-level">100%</span>
+          <button id="zoom-in" class="btn" type="button" aria-label="放大">+</button>
+          <button id="zoom-reset" class="btn" type="button">适应宽度</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="fullscreen-btn" class="btn" type="button" hidden>⤢ 全屏</button>
+          <button id="copy-btn" class="btn" type="button">⧉ 复制源码</button>
+        </div>
+      </div>
+
+      <div id="viewport" class="viewport" hidden>
+        <div id="pan-zoom" class="pan-zoom"></div>
+      </div>
+
+      <div id="error" class="error" hidden>
+        <div class="error-title">Mermaid diagram could not be rendered</div>
+        <pre id="error-message" class="error-message"></pre>
+        <details class="error-source">
+          <summary>Diagram source</summary>
+          <pre id="error-source-code"></pre>
+        </details>
+      </div>
+    </main>
+    <script type="module" src="/src/mcp-app.ts"></script>
+  </body>
+</html>
