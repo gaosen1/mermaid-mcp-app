@@ -147,6 +147,12 @@ viewportEl.addEventListener(
   "wheel",
   (e) => {
     if (viewportEl.hidden) return;
+    // Only zoom while Cmd/Ctrl is held (Ctrl doubles as what browsers set
+    // for a trackpad pinch gesture). A plain wheel scroll is left alone so
+    // it falls through to the surrounding chat's normal scroll — otherwise
+    // scrolling past the diagram while reading the conversation silently
+    // turns into zooming instead.
+    if (!e.metaKey && !e.ctrlKey) return;
     e.preventDefault();
     const rect = viewportEl.getBoundingClientRect();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
