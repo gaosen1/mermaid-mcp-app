@@ -200,10 +200,35 @@ function endPan(e: PointerEvent) {
 viewportEl.addEventListener("pointerup", endPan);
 viewportEl.addEventListener("pointercancel", endPan);
 
-new ResizeObserver(() => {
-  if (!userAdjusted && !panZoomEl.hidden && panZoomEl.querySelector("svg")) {
-    fitToWidth();
-  }
+// Guard against a self-triggered feedback loop: fitToWidth() sets
+// viewportEl's own height, which — via the host's autoResize reacting to
+// the resulting body-height change and adjusting the iframe, which can
+// perturb the container's resolved width by a hair (e.g. a scrollbar
+// toggling) — can re-fire this same observer, which calls fitToWidth()
+// again, which changes the height again... each round growing the box a
+// bit more, forever. Only react when the WIDTH actually changed; a
+// height-only change is either our own write or irrelevant to the fit.
+let lastObservedWidth = 0;
+
+// Belt-and-suspenders circuit breaker: even with the width-only guard
+// above, cap how many times a burst of resize events can trigger a refit
+// so a loop neither of us has fully diagnosed can't grow the box forever.
+let refitBurstCount = 0;
+let refitBurstResetTimer: ReturnType<typeof setTimeout> | undefined;
+
+new ResizeObserver((entries) => {
+  const width = entries[0]?.contentRect.width ?? viewportEl.clientWidth;
+  if (Math.abs(width - lastObservedWidth) < 1) return;
+  lastObservedWidth = width;
+  if (userAdjusted || panZoomEl.hidden || !panZoomEl.querySelector("svg")) return;
+
+  clearTimeout(refitBurstResetTimer);
+  refitBurstResetTimer = setTimeout(() => {
+    refitBurstCount = 0;
+  }, 2000);
+  if (++refitBurstCount > 5) return;
+
+  fitToWidth();
 }).observe(viewportEl);
 
 // ---- Copy source --------------------------------------------------------
