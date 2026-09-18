@@ -107,12 +107,16 @@ function fitToWidth() {
 
   const viewportWidth = viewportEl.clientWidth || width;
 
-  // Scale by WIDTH ONLY, so text stays a readable, consistent size no matter
-  // how tall the diagram is. (Scaling to also fit a capped box height, as a
-  // previous version did, shrank tall flowchart-TD/sequence diagrams down to
-  // illegible text just to avoid a scrollbar — pan/zoom exists precisely so
-  // that trade-off is never necessary.)
-  baseScale = clamp(viewportWidth / width, MIN_SCALE, MAX_SCALE);
+  // Scale by WIDTH ONLY (never by a capped box height — that shrinks tall
+  // diagrams down to illegible text just to dodge a scrollbar; pan exists
+  // precisely so that trade-off is never necessary), but never scale ABOVE
+  // the diagram's own natural size either: Mermaid already renders at a
+  // comfortable, readable size, so a small/simple diagram in a wide chat
+  // panel must not get stretched to fill the full width — that blows it up
+  // to a giant, oversized render instead of a readable one. Only shrink to
+  // fit when the diagram is naturally wider than the container.
+  const widthScale = viewportWidth / width;
+  baseScale = clamp(Math.min(widthScale, 1), MIN_SCALE, MAX_SCALE);
   scale = baseScale;
 
   // The box itself just needs to be a sane viewing window: short diagrams
