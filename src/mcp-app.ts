@@ -85,13 +85,11 @@ function getSvgNaturalSize(svg: SVGSVGElement): { width: number; height: number 
 }
 
 const VIEWPORT_MIN_HEIGHT = 160;
-const VIEWPORT_MAX_HEIGHT = 720;
+// A comfortable viewing window, not a hard content limit — pan/zoom already
+// exist for diagrams taller than this, so the box caps out at a reasonable
+// widget size instead of growing to match arbitrarily tall content.
+const VIEWPORT_MAX_HEIGHT = 640;
 
-// Sizes the viewport box to the diagram's own aspect ratio (clamped to a
-// sane range) and scales the diagram to fit BOTH axes of that box — a plain
-// fit-to-width breaks down for tall flowchart-TD/sequence diagrams, which
-// would otherwise get clipped by a fixed-height box and force the user to
-// zoom out (and squint) just to see the whole thing.
 function fitToWidth() {
   const svg = panZoomEl.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
@@ -109,14 +107,20 @@ function fitToWidth() {
 
   const viewportWidth = viewportEl.clientWidth || width;
 
-  const naturalAspectHeight = viewportWidth * (height / width);
-  const targetHeight = clamp(naturalAspectHeight, VIEWPORT_MIN_HEIGHT, VIEWPORT_MAX_HEIGHT);
-  viewportEl.style.height = `${targetHeight}px`;
-
-  const widthScale = viewportWidth / width;
-  const heightScale = targetHeight / height;
-  baseScale = clamp(Math.min(widthScale, heightScale), MIN_SCALE, MAX_SCALE);
+  // Scale by WIDTH ONLY, so text stays a readable, consistent size no matter
+  // how tall the diagram is. (Scaling to also fit a capped box height, as a
+  // previous version did, shrank tall flowchart-TD/sequence diagrams down to
+  // illegible text just to avoid a scrollbar — pan/zoom exists precisely so
+  // that trade-off is never necessary.)
+  baseScale = clamp(viewportWidth / width, MIN_SCALE, MAX_SCALE);
   scale = baseScale;
+
+  // The box itself just needs to be a sane viewing window: short diagrams
+  // get a snugly-fit box (no dead space below them), tall ones cap out and
+  // rely on the pan/zoom the toolbar already provides for the rest.
+  const renderedHeight = height * baseScale;
+  viewportEl.style.height = `${clamp(renderedHeight, VIEWPORT_MIN_HEIGHT, VIEWPORT_MAX_HEIGHT)}px`;
+
   translateX = 0;
   translateY = 0;
   userAdjusted = false;
