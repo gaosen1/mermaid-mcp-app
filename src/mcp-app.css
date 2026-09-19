@@ -104,8 +104,13 @@ body {
   border: 1px solid var(--mermaid-border);
   border-radius: 8px;
   background: var(--mermaid-bg);
+}
+
+/* Drag-to-pan only exists once the diagram overflows the box (i.e. after
+   zooming in). At fit-size there's nothing to pan, and leaving the mouse
+   alone there is what keeps node text selectable/copyable. */
+.viewport.pannable {
   cursor: grab;
-  touch-action: none;
 }
 
 .viewport.panning {
@@ -113,7 +118,10 @@ body {
 }
 
 .pan-zoom {
-  display: inline-block;
+  /* block, not inline-block: an inline-block sits on a line box and adds a
+     few px of descender gap below the SVG, which would cause a phantom
+     scrollbar even when the diagram fits exactly. */
+  display: block;
 }
 
 .pan-zoom svg {

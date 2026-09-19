@@ -96,10 +96,23 @@ function getSvgNaturalSize(svg: SVGSVGElement): { width: number; height: number 
 }
 
 const VIEWPORT_MIN_HEIGHT = 160;
-// A comfortable viewing window, not a hard content limit — pan/zoom already
-// exist for diagrams taller than this, so the box caps out at a reasonable
-// widget size instead of growing to match arbitrarily tall content.
-const VIEWPORT_MAX_HEIGHT = 640;
+// The box is sized to the diagram so the whole thing is visible at once with
+// no scrolling; the host grows the iframe to follow the content. This cap is
+// only a safety valve for absurdly tall diagrams, which fall back to native
+// scrolling.
+const VIEWPORT_MAX_HEIGHT = 4000;
+const VIEWPORT_BORDER_PX = 2; // 1px top + 1px bottom; box-sizing is border-box
+
+function isOverflowing(): boolean {
+  return (
+    viewportEl.scrollWidth > viewportEl.clientWidth + 1 ||
+    viewportEl.scrollHeight > viewportEl.clientHeight + 1
+  );
+}
+
+function updatePanAffordance() {
+  viewportEl.classList.toggle("pannable", isOverflowing());
+}
 
 function fitToWidth() {
   const svg = panZoomEl.querySelector("svg") as SVGSVGElement | null;
@@ -126,8 +139,9 @@ function fitToWidth() {
   // The box itself just needs to be a sane viewing window: short diagrams
   // get a snugly-fit box (no dead space below them), tall ones cap out and
   // rely on the pan/zoom (now native scroll) the toolbar already provides.
-  const renderedHeight = naturalHeight * baseScale;
+  const renderedHeight = naturalHeight * baseScale + VIEWPORT_BORDER_PX;
   viewportEl.style.height = `${clamp(renderedHeight, VIEWPORT_MIN_HEIGHT, VIEWPORT_MAX_HEIGHT)}px`;
+  updatePanAffordance();
 
   viewportEl.scrollLeft = 0;
   viewportEl.scrollTop = 0;
@@ -151,6 +165,7 @@ function zoomAt(px: number, py: number, factor: number) {
   viewportEl.scrollLeft = contentX * actualFactor - px;
   viewportEl.scrollTop = contentY * actualFactor - py;
   userAdjusted = true;
+  updatePanAffordance();
 }
 
 function zoomAtCenter(factor: number) {
@@ -184,6 +199,9 @@ let panPointerId: number | null = null;
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 
 viewportEl.addEventListener("pointerdown", (e) => {
+  // Don't hijack the mouse unless there's actually something to pan — that's
+  // what keeps node text selectable at fit-size. Touch keeps native scrolling.
+  if (e.pointerType !== "mouse" || !isOverflowing()) return;
   panPointerId = e.pointerId;
   panStart = {
     x: e.clientX,
