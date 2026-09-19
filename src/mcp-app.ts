@@ -57,21 +57,32 @@ const MAX_SCALE = 8;
 
 let baseScale = 1;
 let scale = 1;
-let translateX = 0;
-let translateY = 0;
+let naturalWidth = 0;
+let naturalHeight = 0;
 let userAdjusted = false;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function applyTransform() {
-  panZoomEl.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
-}
-
 function updateZoomLabel() {
   const pct = baseScale > 0 ? Math.round((scale / baseScale) * 100) : 100;
   zoomLevelEl.textContent = `${pct}%`;
+}
+
+// Sets the SVG's own real layout size (not a CSS transform) — see the
+// comment on .viewport in mcp-app.css for why: transform+overflow:hidden
+// didn't reliably clip in every host, so sizing is real and overflow is
+// handled by the browser's native scrolling instead.
+function applySvgWidth(widthPx: number) {
+  const svg = panZoomEl.querySelector("svg") as SVGSVGElement | null;
+  if (!svg || naturalWidth <= 0) return;
+  const clampedWidth = clamp(widthPx, naturalWidth * MIN_SCALE, naturalWidth * MAX_SCALE);
+  const heightPx = clampedWidth * (naturalHeight / naturalWidth);
+  svg.style.width = `${clampedWidth}px`;
+  svg.style.height = `${heightPx}px`;
+  scale = clampedWidth / naturalWidth;
+  updateZoomLabel();
 }
 
 function getSvgNaturalSize(svg: SVGSVGElement): { width: number; height: number } {
@@ -93,19 +104,11 @@ const VIEWPORT_MAX_HEIGHT = 640;
 function fitToWidth() {
   const svg = panZoomEl.querySelector("svg") as SVGSVGElement | null;
   if (!svg) return;
-  const { width, height } = getSvgNaturalSize(svg);
+  const size = getSvgNaturalSize(svg);
+  naturalWidth = size.width;
+  naturalHeight = size.height;
 
-  // The SVG mermaid emits has width="100%", which needs a containing block
-  // with a definite width to resolve against. #pan-zoom is absolutely
-  // positioned with no explicit size, so that never resolves and the
-  // browser falls back to the ~300x150 default replaced-element box —
-  // rendering (and then scaling) the wrong size entirely. Giving #pan-zoom
-  // its true natural pixel dimensions fixes the SVG's own sizing, and the
-  // CSS transform below then scales that correctly-sized box.
-  panZoomEl.style.width = `${width}px`;
-  panZoomEl.style.height = `${height}px`;
-
-  const viewportWidth = viewportEl.clientWidth || width;
+  const viewportWidth = viewportEl.clientWidth || naturalWidth;
 
   // Scale by WIDTH ONLY (never by a capped box height — that shrinks tall
   // diagrams down to illegible text just to dodge a scrollbar; pan exists
@@ -115,32 +118,39 @@ function fitToWidth() {
   // panel must not get stretched to fill the full width — that blows it up
   // to a giant, oversized render instead of a readable one. Only shrink to
   // fit when the diagram is naturally wider than the container.
-  const widthScale = viewportWidth / width;
+  const widthScale = viewportWidth / naturalWidth;
   baseScale = clamp(Math.min(widthScale, 1), MIN_SCALE, MAX_SCALE);
-  scale = baseScale;
+
+  applySvgWidth(naturalWidth * baseScale);
 
   // The box itself just needs to be a sane viewing window: short diagrams
   // get a snugly-fit box (no dead space below them), tall ones cap out and
-  // rely on the pan/zoom the toolbar already provides for the rest.
-  const renderedHeight = height * baseScale;
+  // rely on the pan/zoom (now native scroll) the toolbar already provides.
+  const renderedHeight = naturalHeight * baseScale;
   viewportEl.style.height = `${clamp(renderedHeight, VIEWPORT_MIN_HEIGHT, VIEWPORT_MAX_HEIGHT)}px`;
 
-  translateX = 0;
-  translateY = 0;
+  viewportEl.scrollLeft = 0;
+  viewportEl.scrollTop = 0;
   userAdjusted = false;
-  applyTransform();
-  updateZoomLabel();
 }
 
 function zoomAt(px: number, py: number, factor: number) {
-  const newScale = clamp(scale * factor, MIN_SCALE, MAX_SCALE);
-  const actualFactor = newScale / scale;
-  translateX = px - (px - translateX) * actualFactor;
-  translateY = py - (py - translateY) * actualFactor;
-  scale = newScale;
+  const svg = panZoomEl.querySelector("svg") as SVGSVGElement | null;
+  if (!svg) return;
+  const oldWidthPx = parseFloat(svg.style.width) || naturalWidth * scale;
+
+  // Keep the point under the cursor/anchor visually stationary: convert it
+  // to content-space coordinates before resizing, then re-derive the scroll
+  // offset that puts that same content point back under the anchor after.
+  const contentX = viewportEl.scrollLeft + px;
+  const contentY = viewportEl.scrollTop + py;
+
+  applySvgWidth(oldWidthPx * factor);
+  const actualFactor = (parseFloat(svg.style.width) || oldWidthPx) / oldWidthPx;
+
+  viewportEl.scrollLeft = contentX * actualFactor - px;
+  viewportEl.scrollTop = contentY * actualFactor - py;
   userAdjusted = true;
-  applyTransform();
-  updateZoomLabel();
 }
 
 function zoomAtCenter(factor: number) {
@@ -159,7 +169,8 @@ viewportEl.addEventListener(
     // for a trackpad pinch gesture). A plain wheel scroll is left alone so
     // it falls through to the surrounding chat's normal scroll — otherwise
     // scrolling past the diagram while reading the conversation silently
-    // turns into zooming instead.
+    // turns into zooming instead. (A plain scroll here still natively
+    // scrolls the viewport box itself first, which is the point.)
     if (!e.metaKey && !e.ctrlKey) return;
     e.preventDefault();
     const rect = viewportEl.getBoundingClientRect();
@@ -170,21 +181,25 @@ viewportEl.addEventListener(
 );
 
 let panPointerId: number | null = null;
-let panStart = { x: 0, y: 0, tx: 0, ty: 0 };
+let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 
 viewportEl.addEventListener("pointerdown", (e) => {
   panPointerId = e.pointerId;
-  panStart = { x: e.clientX, y: e.clientY, tx: translateX, ty: translateY };
+  panStart = {
+    x: e.clientX,
+    y: e.clientY,
+    scrollLeft: viewportEl.scrollLeft,
+    scrollTop: viewportEl.scrollTop,
+  };
   viewportEl.classList.add("panning");
   viewportEl.setPointerCapture(e.pointerId);
 });
 
 viewportEl.addEventListener("pointermove", (e) => {
   if (panPointerId !== e.pointerId) return;
-  translateX = panStart.tx + (e.clientX - panStart.x);
-  translateY = panStart.ty + (e.clientY - panStart.y);
+  viewportEl.scrollLeft = panStart.scrollLeft - (e.clientX - panStart.x);
+  viewportEl.scrollTop = panStart.scrollTop - (e.clientY - panStart.y);
   userAdjusted = true;
-  applyTransform();
 });
 
 function endPan(e: PointerEvent) {
@@ -380,8 +395,19 @@ function extractCode(result: CallToolResult): string | null {
   return match?.[1] ?? null;
 }
 
+let lastAppliedTheme: string | undefined;
+
 function handleHostContextChanged(ctx: McpUiHostContext) {
-  if (ctx.theme) {
+  // The host can fire this notification many times in a burst for reasons
+  // that have nothing to do with theme (e.g. container size settling right
+  // after mount) — ctx.theme is present on every one of them, not just
+  // actual theme flips. Re-rendering unconditionally on each one re-fits
+  // the diagram, which changes the widget's height, which the host can
+  // treat as a further context change, and around it goes: a growth loop
+  // through this path instead of the ResizeObserver one fixed earlier.
+  // Only re-render when the theme actually changed.
+  if (ctx.theme && ctx.theme !== lastAppliedTheme) {
+    lastAppliedTheme = ctx.theme;
     applyDocumentTheme(ctx.theme);
     initMermaid(ctx.theme);
     if (lastCode) void renderMermaid(lastCode);

@@ -91,12 +91,16 @@ body {
 }
 
 .viewport {
-  position: relative;
   width: 100%;
   /* Height is set inline by fitToWidth() based on the diagram's own aspect
      ratio (clamped); this is just a pre-render fallback. */
   height: 160px;
-  overflow: hidden;
+  /* Native scroll, not a transform+overflow:hidden clip — that combination
+     turned out not to reliably clip in every MCP Apps host (Claude Desktop
+     visibly failed to clip it despite computed styles reporting it should),
+     so pan/zoom uses the browser's own scrolling instead of a CSS
+     transform, which is a far more basic and universally-supported path. */
+  overflow: auto;
   border: 1px solid var(--mermaid-border);
   border-radius: 8px;
   background: var(--mermaid-bg);
@@ -109,10 +113,6 @@ body {
 }
 
 .pan-zoom {
-  position: absolute;
-  top: 0;
-  left: 0;
-  transform-origin: 0 0;
   display: inline-block;
 }
 
