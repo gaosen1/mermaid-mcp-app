@@ -47,6 +47,10 @@ function initMermaid(theme: "light" | "dark") {
     securityLevel: "strict",
     theme: theme === "dark" ? "dark" : "default",
     fontFamily: "inherit",
+    // dagre follows reading order best; `secure` stops a diagram's own
+    // frontmatter/directives from switching to elk or a hierarchical layout.
+    layout: "dagre",
+    secure: [...(mermaid.mermaidAPI.getConfig().secure ?? []), "layout"],
   });
 }
 
