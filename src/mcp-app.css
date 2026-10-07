@@ -161,3 +161,28 @@ body {
   padding: 8px;
   background: var(--mermaid-bg);
 }
+
+.log-details {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--mermaid-muted);
+}
+
+.log-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.log {
+  margin: 4px 0 0;
+  padding: 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--mermaid-border);
+  border-radius: 6px;
+  background: var(--mermaid-bg);
+  color: var(--mermaid-fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

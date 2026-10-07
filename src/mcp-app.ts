@@ -20,6 +20,19 @@ import type { CallToolResult } from "@modelcontextprotocol/client";
 import mermaid from "mermaid";
 import "./mcp-app.css";
 
+// Baked in by the server's per-call resource (see server.ts bakeCodeIntoHtml)
+// when the host fetched a call-specific ui://mermaid/viewer/{id}.html rather
+// than the generic shell. Lets this diagram render without depending on
+// ui/notifications/tool-input|tool-result, which a host may stop sending for
+// an old call (e.g. after recycling this server's process during an idle
+// session) — see server.ts for the full rationale.
+declare global {
+  interface Window {
+    __MERMAID_INITIAL_CODE__?: string;
+    __MERMAID_INITIAL_ID__?: string;
+  }
+}
+
 const statusEl = document.getElementById("status")!;
 const toolbarEl = document.getElementById("toolbar")!;
 const zoomOutBtn = document.getElementById("zoom-out") as HTMLButtonElement;
@@ -28,14 +41,19 @@ const zoomResetBtn = document.getElementById("zoom-reset") as HTMLButtonElement;
 const zoomLevelEl = document.getElementById("zoom-level")!;
 const fullscreenBtn = document.getElementById("fullscreen-btn") as HTMLButtonElement;
 const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
+const importBtn = document.getElementById("import-btn") as HTMLButtonElement;
+const logDetailsEl = document.getElementById("log-details") as HTMLDetailsElement;
+const logEl = document.getElementById("log")!;
 const viewportEl = document.getElementById("viewport")!;
 const panZoomEl = document.getElementById("pan-zoom")!;
 const errorEl = document.getElementById("error")!;
 const errorMessageEl = document.getElementById("error-message")!;
 const errorSourceEl = document.getElementById("error-source-code")!;
+const errorSourceDetailsEl = document.getElementById("error-source-details")!;
 
 let renderCount = 0;
 let lastCode: string | null = null;
+let lastId: string | null = null;
 
 // ---- Theme -----------------------------------------------------------
 
@@ -326,6 +344,66 @@ async function copySource() {
 }
 copyBtn.addEventListener("click", () => void copySource());
 
+// ---- In-view log ----------------------------------------------------------
+// Sandboxed iframes swallow window.prompt/alert and the host hides this
+// frame's console, so anything worth debugging (notably import failures) is
+// written here instead, behind a collapsed "日志" toggle.
+
+const MAX_LOG_LINES = 14;
+const logLines: string[] = [];
+
+function log(message: string, { reveal = false }: { reveal?: boolean } = {}) {
+  const time = new Date().toLocaleTimeString("en-GB");
+  logLines.push(`${time} ${message}`);
+  if (logLines.length > MAX_LOG_LINES) logLines.shift();
+  logEl.textContent = logLines.join("\n");
+  logDetailsEl.hidden = false;
+  if (reveal) logDetailsEl.open = true;
+}
+
+// ---- Import to Mermaid Local --------------------------------------------
+
+const IMPORT_LABEL = "→ Mermaid Local";
+let importFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+function flashImportLabel(text: string, revertAfterMs = 2400) {
+  importBtn.textContent = text;
+  clearTimeout(importFeedbackTimer);
+  importFeedbackTimer = setTimeout(() => {
+    importBtn.textContent = IMPORT_LABEL;
+    importBtn.disabled = false;
+  }, revertAfterMs);
+}
+
+async function importToMermaidLocal() {
+  if (!lastId) {
+    log("无法导入：这个 widget 没拿到渲染 id（不是由当前服务端版本生成的结果）。", { reveal: true });
+    flashImportLabel("导入失败 ✗");
+    return;
+  }
+  importBtn.disabled = true;
+  importBtn.textContent = "导入中…";
+  log(`→ callServerTool import_to_mermaid_local id=${lastId} serverTools=${JSON.stringify(app.getHostCapabilities()?.serverTools ?? null)}`);
+  try {
+    const result = await app.callServerTool({ name: "import_to_mermaid_local", arguments: { id: lastId } });
+    log(`← isError=${String(result.isError ?? false)} structuredContent=${JSON.stringify(result.structuredContent ?? null)} content=${JSON.stringify(result.content ?? null)}`);
+    const structured = result.structuredContent as { ok?: boolean; message?: string } | undefined;
+    if (structured?.ok) {
+      flashImportLabel("已导入 ✓");
+      log(structured.message ?? "已导入", { reveal: true });
+    } else {
+      flashImportLabel("导入失败 ✗");
+      const fallback = result.content?.find((c) => c.type === "text")?.text;
+      log(`导入失败：${structured?.message ?? fallback ?? "(无错误信息)"}`, { reveal: true });
+    }
+  } catch (err) {
+    flashImportLabel("导入失败 ✗");
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : JSON.stringify(err);
+    log(`callServerTool 抛出异常：${detail}`, { reveal: true });
+  }
+}
+importBtn.addEventListener("click", () => void importToMermaidLocal());
+
 // ---- Fullscreen ---------------------------------------------------------
 
 let currentDisplayMode: string | undefined;
@@ -367,6 +445,9 @@ function showError(message: string, code: string) {
   errorEl.hidden = false;
   errorMessageEl.textContent = message;
   errorSourceEl.textContent = code;
+  // Nothing to show for the "host never delivered a tool result" case — an
+  // empty, expandable "Diagram source" block there would just be confusing.
+  errorSourceDetailsEl.hidden = code.length === 0;
 }
 
 function showDiagram(svg: string) {
@@ -417,6 +498,11 @@ function extractCode(result: CallToolResult): string | null {
   return match?.[1] ?? null;
 }
 
+function extractId(result: CallToolResult): string | null {
+  const structured = result.structuredContent as { id?: string } | undefined;
+  return structured?.id ?? null;
+}
+
 let lastAppliedTheme: string | undefined;
 
 function handleHostContextChanged(ctx: McpUiHostContext) {
@@ -447,19 +533,41 @@ function handleHostContextChanged(ctx: McpUiHostContext) {
 const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
 initMermaid(prefersDark ? "dark" : "light");
 
+const initialCode = typeof window.__MERMAID_INITIAL_CODE__ === "string" ? window.__MERMAID_INITIAL_CODE__ : null;
+const initialId = typeof window.__MERMAID_INITIAL_ID__ === "string" ? window.__MERMAID_INITIAL_ID__ : null;
+
+// Render immediately if the server baked the source into this document —
+// don't wait on ui/initialize or any notification for the common case.
+if (initialCode) {
+  lastId = initialId;
+  void renderMermaid(initialCode);
+}
+
 const app = new App({ name: "Mermaid Viewer", version: "1.0.0" });
 
 // Register handlers before connect() so we don't miss the initial tool result.
 app.ontoolinput = () => {
-  showStatus("Rendering diagram…");
+  if (!initialCode) showStatus("Rendering diagram…");
 };
 
 app.ontoolresult = (result) => {
-  const code = extractCode(result);
+  if (result.isError) {
+    // The tool call itself failed (e.g. rejected arguments) — hosts still
+    // mount this view for it, so say what actually went wrong instead of
+    // blaming a cleaned-up session.
+    const text = result.content?.find((c) => c.type === "text")?.text;
+    showError(text ?? "The render_mermaid tool call failed.", "");
+    return;
+  }
+  const code = extractCode(result) ?? initialCode;
+  lastId = extractId(result) ?? initialId;
   if (code) {
     void renderMermaid(code);
   } else {
-    showError("No Mermaid source was provided in the tool result.", "");
+    showError(
+      "This diagram's data is no longer available from the conversation host, most likely because the session sat idle long enough for it to be cleaned up. The original Mermaid source wasn't lost by this viewer — it was never resent to it. Ask Claude to render the diagram again to restore it.",
+      "",
+    );
   }
 };
 
@@ -472,4 +580,8 @@ app.onerror = (err) => {
 app.connect().then(() => {
   const ctx = app.getHostContext();
   if (ctx) handleHostContextChanged(ctx);
+  // Hide rather than disable: a host that can't proxy tool calls back to
+  // the server has no path to make this button ever work.
+  importBtn.hidden = !app.getHostCapabilities()?.serverTools;
+  log(`host=${JSON.stringify(app.getHostVersion?.() ?? null)} serverTools=${JSON.stringify(app.getHostCapabilities()?.serverTools ?? null)} id=${lastId ?? "(none yet)"}`);
 });

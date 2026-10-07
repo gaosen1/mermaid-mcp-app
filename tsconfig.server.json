@@ -14,5 +14,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["server.ts", "main.ts"]
+  "include": ["server.ts", "main.ts", "config.ts"]
 }

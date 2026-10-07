@@ -20,8 +20,14 @@
         <div class="toolbar-group">
           <button id="fullscreen-btn" class="btn" type="button" hidden>⤢ 全屏</button>
           <button id="copy-btn" class="btn" type="button">⧉ 复制源码</button>
+          <button id="import-btn" class="btn" type="button" hidden title="复制这张图到 Mermaid Local 笔记">→ Mermaid Local</button>
         </div>
       </div>
+
+      <details id="log-details" class="log-details" hidden>
+        <summary>日志</summary>
+        <pre id="log" class="log"></pre>
+      </details>
 
       <div id="viewport" class="viewport" hidden title="按住 ⌘/Ctrl 用滚轮缩放，拖动可平移">
         <div id="pan-zoom" class="pan-zoom"></div>
@@ -30,7 +36,7 @@
       <div id="error" class="error" hidden>
         <div class="error-title">Mermaid diagram could not be rendered</div>
         <pre id="error-message" class="error-message"></pre>
-        <details class="error-source">
+        <details id="error-source-details" class="error-source">
           <summary>Diagram source</summary>
           <pre id="error-source-code"></pre>
         </details>
