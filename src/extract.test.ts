@@ -4,12 +4,17 @@ import { extractPayload } from "./extract";
 
 const CODE = "flowchart LR\nA[开始] --> B[结束]";
 const ID = "b6c23ded-cc31-4f56-a8d3-8c2328f417b9";
+const TITLE = "登录鉴权流程";
 
 const text = (t: string): CallToolResult => ({ content: [{ type: "text", text: t }] });
 
 describe("extractPayload", () => {
   it("reads structuredContent from a live result", () => {
-    expect(extractPayload({ content: [], structuredContent: { code: CODE, id: ID } })).toEqual({ code: CODE, id: ID });
+    expect(extractPayload({ content: [], structuredContent: { code: CODE, id: ID, title: TITLE } })).toEqual({
+      code: CODE,
+      id: ID,
+      title: TITLE,
+    });
   });
 
   it("prefers structuredContent over the text", () => {
@@ -17,15 +22,25 @@ describe("extractPayload", () => {
       content: [{ type: "text", text: JSON.stringify({ code: "stale", id: "old" }) }],
       structuredContent: { code: CODE, id: ID },
     };
-    expect(extractPayload(result)).toEqual({ code: CODE, id: ID });
+    expect(extractPayload(result)).toEqual({ code: CODE, id: ID, title: null });
   });
 
-  it("recovers source and id from the JSON text a replaying host hands back (Code tab)", () => {
-    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID })))).toEqual({ code: CODE, id: ID });
+  it("recovers source, id and title from the JSON text a replaying host hands back (Code tab)", () => {
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID, title: TITLE })))).toEqual({
+      code: CODE,
+      id: ID,
+      title: TITLE,
+    });
+  });
+
+  it("treats a missing or empty title as null", () => {
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID })))?.title).toBeNull();
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID, title: "" })))?.title).toBeNull();
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID, title: 42 })))?.title).toBeNull();
   });
 
   it("recovers older results that were saved before ids existed", () => {
-    expect(extractPayload(text(JSON.stringify({ code: CODE })))).toEqual({ code: CODE, id: null });
+    expect(extractPayload(text(JSON.stringify({ code: CODE })))).toEqual({ code: CODE, id: null, title: null });
   });
 
   it("skips non-JSON and non-text blocks until it finds the payload", () => {
@@ -36,13 +51,14 @@ describe("extractPayload", () => {
         { type: "text", text: JSON.stringify({ code: CODE, id: ID }) },
       ],
     };
-    expect(extractPayload(result)).toEqual({ code: CODE, id: ID });
+    expect(extractPayload(result)).toEqual({ code: CODE, id: ID, title: null });
   });
 
   it("falls back to a mermaid fence in plain text, without an id", () => {
     expect(extractPayload(text("Rendered a Mermaid diagram.\n```mermaid\n" + CODE + "\n```"))).toEqual({
       code: CODE,
       id: null,
+      title: null,
     });
   });
 

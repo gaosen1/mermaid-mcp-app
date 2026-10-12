@@ -93,6 +93,13 @@ function renderMetaPath(id: string): string {
   return path.join(RENDERS_DIR, `${id}.json`);
 }
 
+async function readRenderMeta(id: string): Promise<RenderMeta | null> {
+  return fs
+    .readFile(renderMetaPath(id), "utf-8")
+    .then((raw) => JSON.parse(raw) as RenderMeta)
+    .catch(() => null);
+}
+
 /**
  * Imports a persisted render into the user's Mermaid Local notes app via its
  * local `agent-api.mjs` REST server (see that script's own header comment
@@ -108,11 +115,7 @@ async function importRenderToMermaidLocal(id: string): Promise<{ ok: boolean; me
   if (code === null) {
     return { ok: false, message: `找不到这次渲染的源码（id: ${id}），可能已经被清理。` };
   }
-  const meta = await fs
-    .readFile(renderMetaPath(id), "utf-8")
-    .then((raw) => JSON.parse(raw) as RenderMeta)
-    .catch(() => null);
-  const name = meta?.title || id;
+  const name = (await readRenderMeta(id))?.title || id;
 
   let token: string;
   try {
@@ -144,12 +147,12 @@ async function importRenderToMermaidLocal(id: string): Promise<{ ok: boolean; me
   }
 }
 
-/** Injects the persisted Mermaid source (and its id, so the View can later
+/** Injects the persisted Mermaid source (plus its title, and its id so the View can later
  * call back with `import_to_mermaid_local`) into the generic HTML shell, so
  * the View can render immediately on load without waiting on (or depending
  * on) tool-input/tool-result notifications from the host. */
-function bakeCodeIntoHtml(html: string, code: string, id: string): string {
-  const script = `<script>window.__MERMAID_INITIAL_CODE__=${JSON.stringify(code)};window.__MERMAID_INITIAL_ID__=${JSON.stringify(id)};</script>`;
+function bakeCodeIntoHtml(html: string, code: string, id: string, title: string | null): string {
+  const script = `<script>window.__MERMAID_INITIAL_CODE__=${JSON.stringify(code)};window.__MERMAID_INITIAL_ID__=${JSON.stringify(id)};window.__MERMAID_INITIAL_TITLE__=${JSON.stringify(title)};</script>`;
   return html.includes("</head>") ? html.replace("</head>", `${script}</head>`) : script + html;
 }
 
@@ -161,7 +164,7 @@ When to call this tool:
 
 Input contract:
 - Pass ONLY the raw Mermaid diagram source as \`code\` (e.g. starting with "flowchart", "sequenceDiagram", "classDiagram", "erDiagram", "stateDiagram-v2", "gantt", etc.). Do not wrap it in a markdown code fence and do not include any other prose in \`code\`.
-- Always also pass \`title\` (required): a short (under ~60 chars) human-readable label for what this diagram is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). It is not shown inline; it becomes the name of the diagram when the user imports it into their notes (Mermaid Local) and labels it in the local gallery, so make it specific and meaningful rather than generic.
+- Always also pass \`title\` (required): a short (under ~60 chars) human-readable label for what this diagram is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). It is shown in the top bar of the rendered diagram, and it becomes the name of the diagram when the user imports it into their notes (Mermaid Local) and labels it in the local gallery, so make it specific and meaningful rather than generic.
 
 Layout: the viewer always uses the dagre layout, which follows natural reading order. Do not set \`layout: elk\` or other layout engines in frontmatter/directives — they are ignored.\n\nStyling (use this — don't just default to plain rectangles):
 - Match node SHAPE to its semantic role wherever the diagram type supports it. In flowcharts: \`([text])\` stadium for start/end, \`{text}\` diamond for a decision/branch, \`[(text)]\` cylinder for a database/store, \`[[text]]\` subroutine for a predefined/external process, \`[/text/]\` parallelogram for input/output, \`{{text}}\` hexagon for a preparation/config step, plain \`[text]\` rectangle for an ordinary step.
@@ -209,6 +212,7 @@ export function createServer(): McpServer {
       outputSchema: z.object({
         code: z.string(),
         id: z.string(),
+        title: z.string(),
       }),
       _meta: { ui: { resourceUri: RESOURCE_URI } }, // Links this tool to its UI resource
     },
@@ -235,7 +239,7 @@ export function createServer(): McpServer {
             text: `Rendered a Mermaid diagram (${code.split("\n").length} lines). Source:\n\`\`\`mermaid\n${code}\n\`\`\``,
           },
         ],
-        structuredContent: { code, id },
+        structuredContent: { code, id, title },
         // Both forms set since it's undocumented which one (if either) a
         // given host honors on a *result* rather than a *tool*.
         _meta: {
@@ -305,7 +309,8 @@ export function createServer(): McpServer {
       const code = id ? await fs.readFile(renderIdToPath(id), "utf-8").catch(() => null) : null;
 
       const shell = await fs.readFile(MCP_APP_HTML_PATH, "utf-8");
-      const html = code !== null && id ? bakeCodeIntoHtml(shell, code, id) : shell;
+      const title = id ? ((await readRenderMeta(id))?.title ?? null) : null;
+      const html = code !== null && id ? bakeCodeIntoHtml(shell, code, id, title) : shell;
 
       return {
         contents: [{ uri: uri.toString(), mimeType: RESOURCE_MIME_TYPE, text: html }],

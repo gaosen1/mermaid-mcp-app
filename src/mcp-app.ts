@@ -30,6 +30,7 @@ declare global {
   interface Window {
     __MERMAID_INITIAL_CODE__?: string;
     __MERMAID_INITIAL_ID__?: string;
+    __MERMAID_INITIAL_TITLE__?: string | null;
   }
 }
 
@@ -42,6 +43,7 @@ const zoomLevelEl = document.getElementById("zoom-level")!;
 const fullscreenBtn = document.getElementById("fullscreen-btn") as HTMLButtonElement;
 const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
 const importBtn = document.getElementById("import-btn") as HTMLButtonElement;
+const diagramTitleEl = document.getElementById("diagram-title")!;
 const viewportEl = document.getElementById("viewport")!;
 const panZoomEl = document.getElementById("pan-zoom")!;
 const errorEl = document.getElementById("error")!;
@@ -52,6 +54,7 @@ const errorSourceDetailsEl = document.getElementById("error-source-details")!;
 let renderCount = 0;
 let lastCode: string | null = null;
 let lastId: string | null = null;
+let lastTitle: string | null = null;
 
 // ---- Theme -----------------------------------------------------------
 
@@ -436,6 +439,10 @@ function showDiagram(svg: string) {
   toolbarEl.hidden = false;
   viewportEl.hidden = false;
 
+  diagramTitleEl.textContent = lastTitle ?? "";
+  diagramTitleEl.title = lastTitle ?? "";
+  diagramTitleEl.hidden = !lastTitle;
+
   panZoomEl.innerHTML = svg;
 
   // Wait a frame so the viewport has real layout dimensions before fitting.
@@ -499,11 +506,13 @@ initMermaid(prefersDark ? "dark" : "light");
 
 const initialCode = typeof window.__MERMAID_INITIAL_CODE__ === "string" ? window.__MERMAID_INITIAL_CODE__ : null;
 const initialId = typeof window.__MERMAID_INITIAL_ID__ === "string" ? window.__MERMAID_INITIAL_ID__ : null;
+const initialTitle = typeof window.__MERMAID_INITIAL_TITLE__ === "string" ? window.__MERMAID_INITIAL_TITLE__ : null;
 
 // Render immediately if the server baked the source into this document —
 // don't wait on ui/initialize or any notification for the common case.
 if (initialCode) {
   lastId = initialId;
+  lastTitle = initialTitle;
   void renderMermaid(initialCode);
 }
 
@@ -525,6 +534,7 @@ app.ontoolresult = (result) => {
   const payload = extractPayload(result);
   const code = payload?.code ?? initialCode;
   lastId = payload?.id ?? initialId;
+  lastTitle = payload?.title ?? initialTitle;
   if (code) {
     void renderMermaid(code);
   } else {

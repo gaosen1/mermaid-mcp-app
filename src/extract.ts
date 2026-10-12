@@ -3,17 +3,23 @@ import type { CallToolResult } from "@modelcontextprotocol/client";
 export interface RenderPayload {
   code: string;
   id: string | null;
+  title: string | null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function fromRecord(value: unknown): RenderPayload | null {
   if (!value || typeof value !== "object") return null;
-  const { code, id } = value as { code?: unknown; id?: unknown };
-  if (typeof code !== "string" || code.length === 0) return null;
-  return { code, id: typeof id === "string" ? id : null };
+  const { code, id, title } = value as { code?: unknown; id?: unknown; title?: unknown };
+  const source = nonEmptyString(code);
+  if (!source) return null;
+  return { code: source, id: nonEmptyString(id), title: nonEmptyString(title) };
 }
 
 /**
- * Reads the diagram source (and render id) out of a tool result.
+ * Reads the diagram source (plus render id and title) out of a tool result.
  *
  * Live results carry `structuredContent`. A host replaying a saved
  * conversation does not: Claude's Code tab drops `structuredContent` and
@@ -39,7 +45,7 @@ export function extractPayload(result: CallToolResult): RenderPayload | null {
 
   for (const text of texts) {
     const fenced = text.match(/```mermaid\n([\s\S]*?)\n```/)?.[1];
-    if (fenced) return { code: fenced, id: null };
+    if (fenced) return { code: fenced, id: null, title: null };
   }
   return null;
 }

@@ -56,6 +56,19 @@ body {
   margin-bottom: 6px;
 }
 
+/* Full-width basis forces the title onto its own line above the controls. */
+.diagram-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--mermaid-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar-group {
   display: flex;
   align-items: center;
