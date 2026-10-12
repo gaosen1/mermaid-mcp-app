@@ -53,16 +53,17 @@ body {
   gap: 8px;
   flex-wrap: wrap;
   padding: 6px 4px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
-/* Full-width basis forces the title onto its own line above the controls. */
+/* Sits between the toolbar and the canvas, centered, so it reads as the
+   canvas's caption rather than part of the controls. */
 .diagram-title {
-  flex: 1 1 100%;
-  min-width: 0;
+  margin: 0 0 6px;
   padding: 0 2px;
   font-size: 14px;
   font-weight: 600;
+  text-align: center;
   color: var(--mermaid-fg);
   overflow: hidden;
   text-overflow: ellipsis;

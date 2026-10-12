@@ -417,6 +417,7 @@ function showStatus(text: string) {
   statusEl.textContent = text;
   statusEl.hidden = false;
   toolbarEl.hidden = true;
+  diagramTitleEl.hidden = true;
   viewportEl.hidden = true;
   errorEl.hidden = true;
 }
@@ -424,6 +425,7 @@ function showStatus(text: string) {
 function showError(message: string, code: string) {
   statusEl.hidden = true;
   toolbarEl.hidden = true;
+  diagramTitleEl.hidden = true;
   viewportEl.hidden = true;
   errorEl.hidden = false;
   errorMessageEl.textContent = message;
