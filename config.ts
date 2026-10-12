@@ -18,7 +18,7 @@ export interface MermaidLocalConfig {
 
 const DEFAULTS: MermaidLocalConfig = {
   agentApiBaseUrl: "http://127.0.0.1:4789",
-  defaultProjectName: "Claude 渲染图",
+  defaultProjectName: "LLM",
 };
 
 /** Reads mermaid-local-config.json, falling back to DEFAULTS for missing/invalid fields. */

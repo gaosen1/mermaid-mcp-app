@@ -16,7 +16,7 @@ const CONFIG_PATH = path.join(import.meta.dirname, "mermaid-local-config.json");
 
 const DEFAULTS = {
   agentApiBaseUrl: "http://127.0.0.1:4789",
-  defaultProjectName: "Claude 渲染图",
+  defaultProjectName: "LLM",
 };
 
 function load() {

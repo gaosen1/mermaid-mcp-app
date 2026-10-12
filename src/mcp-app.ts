@@ -16,7 +16,7 @@ import {
   applyHostFonts,
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
-import type { CallToolResult } from "@modelcontextprotocol/client";
+import { extractPayload } from "./extract";
 import mermaid from "mermaid";
 import "./mcp-app.css";
 
@@ -42,8 +42,6 @@ const zoomLevelEl = document.getElementById("zoom-level")!;
 const fullscreenBtn = document.getElementById("fullscreen-btn") as HTMLButtonElement;
 const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
 const importBtn = document.getElementById("import-btn") as HTMLButtonElement;
-const logDetailsEl = document.getElementById("log-details") as HTMLDetailsElement;
-const logEl = document.getElementById("log")!;
 const viewportEl = document.getElementById("viewport")!;
 const panZoomEl = document.getElementById("pan-zoom")!;
 const errorEl = document.getElementById("error")!;
@@ -344,62 +342,44 @@ async function copySource() {
 }
 copyBtn.addEventListener("click", () => void copySource());
 
-// ---- In-view log ----------------------------------------------------------
-// Sandboxed iframes swallow window.prompt/alert and the host hides this
-// frame's console, so anything worth debugging (notably import failures) is
-// written here instead, behind a collapsed "日志" toggle.
-
-const MAX_LOG_LINES = 14;
-const logLines: string[] = [];
-
-function log(message: string, { reveal = false }: { reveal?: boolean } = {}) {
-  const time = new Date().toLocaleTimeString("en-GB");
-  logLines.push(`${time} ${message}`);
-  if (logLines.length > MAX_LOG_LINES) logLines.shift();
-  logEl.textContent = logLines.join("\n");
-  logDetailsEl.hidden = false;
-  if (reveal) logDetailsEl.open = true;
-}
-
 // ---- Import to Mermaid Local --------------------------------------------
 
 const IMPORT_LABEL = "→ Mermaid Local";
+const IMPORT_TITLE = "复制这张图到 Mermaid Local 笔记";
 let importFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
-function flashImportLabel(text: string, revertAfterMs = 2400) {
+// The sandboxed frame has no usable prompt()/console, so the outcome shows on
+// the button itself; the full message (esp. a failure reason) is its tooltip.
+function flashImportLabel(text: string, detail?: string, revertAfterMs = 2400) {
   importBtn.textContent = text;
+  importBtn.title = detail ?? IMPORT_TITLE;
   clearTimeout(importFeedbackTimer);
   importFeedbackTimer = setTimeout(() => {
     importBtn.textContent = IMPORT_LABEL;
+    importBtn.title = IMPORT_TITLE;
     importBtn.disabled = false;
   }, revertAfterMs);
 }
 
 async function importToMermaidLocal() {
   if (!lastId) {
-    log("无法导入：这个 widget 没拿到渲染 id（不是由当前服务端版本生成的结果）。", { reveal: true });
-    flashImportLabel("导入失败 ✗");
+    flashImportLabel("导入失败 ✗", "这个 widget 没拿到渲染 id（不是由当前服务端版本生成的结果）。");
     return;
   }
   importBtn.disabled = true;
   importBtn.textContent = "导入中…";
-  log(`→ callServerTool import_to_mermaid_local id=${lastId} serverTools=${JSON.stringify(app.getHostCapabilities()?.serverTools ?? null)}`);
   try {
     const result = await app.callServerTool({ name: "import_to_mermaid_local", arguments: { id: lastId } });
-    log(`← isError=${String(result.isError ?? false)} structuredContent=${JSON.stringify(result.structuredContent ?? null)} content=${JSON.stringify(result.content ?? null)}`);
     const structured = result.structuredContent as { ok?: boolean; message?: string } | undefined;
     if (structured?.ok) {
-      flashImportLabel("已导入 ✓");
-      log(structured.message ?? "已导入", { reveal: true });
+      flashImportLabel("已导入 ✓", structured.message);
     } else {
-      flashImportLabel("导入失败 ✗");
       const fallback = result.content?.find((c) => c.type === "text")?.text;
-      log(`导入失败：${structured?.message ?? fallback ?? "(无错误信息)"}`, { reveal: true });
+      flashImportLabel("导入失败 ✗", structured?.message ?? fallback ?? "导入失败（没有错误信息）");
     }
   } catch (err) {
-    flashImportLabel("导入失败 ✗");
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : JSON.stringify(err);
-    log(`callServerTool 抛出异常：${detail}`, { reveal: true });
+    flashImportLabel("导入失败 ✗", `callServerTool 抛出异常：${detail}`);
   }
 }
 importBtn.addEventListener("click", () => void importToMermaidLocal());
@@ -487,22 +467,6 @@ async function renderMermaid(code: string) {
   }
 }
 
-function extractCode(result: CallToolResult): string | null {
-  const structured = result.structuredContent as { code?: string } | undefined;
-  if (structured?.code) return structured.code;
-
-  // Fallback for the text-only path, in case a host ever delivers only
-  // `content` without `structuredContent`.
-  const text = result.content?.find((c) => c.type === "text")?.text;
-  const match = text?.match(/```mermaid\n([\s\S]*?)\n```/);
-  return match?.[1] ?? null;
-}
-
-function extractId(result: CallToolResult): string | null {
-  const structured = result.structuredContent as { id?: string } | undefined;
-  return structured?.id ?? null;
-}
-
 let lastAppliedTheme: string | undefined;
 
 function handleHostContextChanged(ctx: McpUiHostContext) {
@@ -553,19 +517,19 @@ app.ontoolinput = () => {
 app.ontoolresult = (result) => {
   if (result.isError) {
     // The tool call itself failed (e.g. rejected arguments) — hosts still
-    // mount this view for it, so say what actually went wrong instead of
-    // blaming a cleaned-up session.
+    // mount this view for it, so say what actually went wrong.
     const text = result.content?.find((c) => c.type === "text")?.text;
     showError(text ?? "The render_mermaid tool call failed.", "");
     return;
   }
-  const code = extractCode(result) ?? initialCode;
-  lastId = extractId(result) ?? initialId;
+  const payload = extractPayload(result);
+  const code = payload?.code ?? initialCode;
+  lastId = payload?.id ?? initialId;
   if (code) {
     void renderMermaid(code);
   } else {
     showError(
-      "This diagram's data is no longer available from the conversation host, most likely because the session sat idle long enough for it to be cleaned up. The original Mermaid source wasn't lost by this viewer — it was never resent to it. Ask Claude to render the diagram again to restore it.",
+      "The host did not pass this diagram's source to the viewer, so there is nothing to draw. Ask Claude to render it again.",
       "",
     );
   }
@@ -583,5 +547,4 @@ app.connect().then(() => {
   // Hide rather than disable: a host that can't proxy tool calls back to
   // the server has no path to make this button ever work.
   importBtn.hidden = !app.getHostCapabilities()?.serverTools;
-  log(`host=${JSON.stringify(app.getHostVersion?.() ?? null)} serverTools=${JSON.stringify(app.getHostCapabilities()?.serverTools ?? null)} id=${lastId ?? "(none yet)"}`);
 });

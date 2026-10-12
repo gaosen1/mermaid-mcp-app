@@ -138,7 +138,7 @@ async function importRenderToMermaidLocal(id: string): Promise<{ ok: boolean; me
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       return { ok: false, message: body.error ?? `导入失败：HTTP ${res.status}` };
     }
-    return { ok: true, message: `已投递到 Mermaid Local 的「${config.defaultProjectName}」项目：Mermaid Local 页面开着时几秒内自动导入，没开则在下次打开时导入。` };
+    return { ok: true, message: `已投递到 Mermaid Local 的「${config.defaultProjectName}」项目：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。` };
   } catch (err) {
     return { ok: false, message: `导入请求失败：${err instanceof Error ? err.message : String(err)}` };
   }
@@ -161,7 +161,7 @@ When to call this tool:
 
 Input contract:
 - Pass ONLY the raw Mermaid diagram source as \`code\` (e.g. starting with "flowchart", "sequenceDiagram", "classDiagram", "erDiagram", "stateDiagram-v2", "gantt", etc.). Do not wrap it in a markdown code fence and do not include any other prose in \`code\`.
-- Always also pass \`title\` (optional in the schema, but always provide it): a short (under ~60 chars) human-readable label for what this diagram is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). This is never shown to the user inline — it exists purely so a later archive/export of past diagrams is browsable instead of a wall of anonymous IDs.
+- Always also pass \`title\` (required): a short (under ~60 chars) human-readable label for what this diagram is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). It is not shown inline; it becomes the name of the diagram when the user imports it into their notes (Mermaid Local) and labels it in the local gallery, so make it specific and meaningful rather than generic.
 
 Layout: the viewer always uses the dagre layout, which follows natural reading order. Do not set \`layout: elk\` or other layout engines in frontmatter/directives — they are ignored.\n\nStyling (use this — don't just default to plain rectangles):
 - Match node SHAPE to its semantic role wherever the diagram type supports it. In flowcharts: \`([text])\` stadium for start/end, \`{text}\` diamond for a decision/branch, \`[(text)]\` cylinder for a database/store, \`[[text]]\` subroutine for a predefined/external process, \`[/text/]\` parallelogram for input/output, \`{{text}}\` hexagon for a preparation/config step, plain \`[text]\` rectangle for an ordinary step.
@@ -198,12 +198,12 @@ export function createServer(): McpServer {
           .string()
           .min(1, "code must be non-empty Mermaid diagram source")
           .describe("Raw Mermaid diagram source, e.g. 'flowchart LR\\nA-->B'"),
-        // Optional on purpose: a session whose cached tool schema predates
-        // this field would otherwise have every call rejected outright.
-        // Missing titles fall back to the file name in the gallery/import.
+        // Required: the title becomes the item name when a render is imported
+        // into Mermaid Local, so leaving it to the model's discretion produced
+        // id-named notes whenever a call skipped it.
         title: z
           .string()
-          .optional()
+          .min(1, "title must be a short non-empty label")
           .describe("Short human-readable label for what this diagram is about, e.g. '会议 Runtime 冷启动时序'"),
       }),
       outputSchema: z.object({
@@ -217,7 +217,6 @@ export function createServer(): McpServer {
       // View (mermaid.parse), since Mermaid's parser only runs in a DOM
       // environment. The tool's job is just to hand the source to the UI;
       // a short text fallback keeps non-MCP-Apps hosts informed.
-      const preview = code.length > 200 ? `${code.slice(0, 200)}…` : code;
 
       const id = crypto.randomUUID();
       const meta: RenderMeta = { title, createdAt: new Date().toISOString() };
@@ -233,7 +232,7 @@ export function createServer(): McpServer {
         content: [
           {
             type: "text",
-            text: `Rendered a Mermaid diagram (${code.split("\n").length} lines). Source:\n\`\`\`mermaid\n${preview}\n\`\`\``,
+            text: `Rendered a Mermaid diagram (${code.split("\n").length} lines). Source:\n\`\`\`mermaid\n${code}\n\`\`\``,
           },
         ],
         structuredContent: { code, id },

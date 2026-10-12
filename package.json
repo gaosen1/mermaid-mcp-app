@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && cross-env INPUT=mcp-app.html vite build",
     "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch\" \"tsx watch main.ts --http\"",
-    "start:stdio": "node dist/main.js --stdio"
+    "start:stdio": "node dist/main.js --stdio",
+    "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.0.0",
@@ -29,6 +30,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^6.0.0",
-    "vite-plugin-singlefile": "^2.3.0"
+    "vite-plugin-singlefile": "^2.3.0",
+    "vitest": "^5.0.3"
   }
 }
