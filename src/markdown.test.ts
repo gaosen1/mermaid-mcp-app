@@ -43,10 +43,35 @@ describe("renderMarkdown", () => {
   });
 
   it("leaves other code blocks as ordinary code", () => {
-    const { html, diagrams } = renderMarkdown(fence("const a = 1", "ts"));
+    const { html, diagrams } = renderMarkdown(fence("const a = 1", "nosuchlang"));
     expect(diagrams).toEqual([]);
     expect(html).toContain("<pre><code");
     expect(html).toContain("const a = 1");
+  });
+
+  it("syntax-highlights a fence whose language has a grammar, resolving aliases", () => {
+    const { html, diagrams } = renderMarkdown(fence("const a: number = 1;", "ts"));
+    expect(diagrams).toEqual([]);
+    expect(html).toContain('<code class="hljs language-ts">');
+    expect(html).toContain('<span class="hljs-keyword">const</span>');
+    expect(html).toContain('<span class="hljs-number">1</span>');
+  });
+
+  it("escapes code text while highlighting, so it cannot inject markup", () => {
+    const { html } = renderMarkdown(fence('<img src=x onerror="alert(1)">', "html"));
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;");
+  });
+
+  it("highlights by the first word of the info string", () => {
+    expect(renderMarkdown(fence("echo hi", "bash title=run.sh")).html).toContain("language-bash");
+  });
+
+  it("leaves a fence with an unknown or missing language as plain code", () => {
+    for (const lang of ["nosuchlang", ""]) {
+      const { html } = renderMarkdown(fence("let x = 1", lang));
+      expect(html).not.toContain("hljs");
+    }
   });
 
   it("does not treat inline code or a plain fence as a diagram", () => {

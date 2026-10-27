@@ -1,4 +1,5 @@
 import { Marked } from "marked";
+import { highlightCode } from "./highlight";
 
 export interface MarkdownRender {
   /** HTML for the document; each mermaid fence is a placeholder to be replaced by its diagram. */
@@ -22,7 +23,11 @@ export function renderMarkdown(source: string): MarkdownRender {
     gfm: true,
     renderer: {
       code({ text, lang }) {
-        if (lang?.trim().toLowerCase() !== "mermaid") return false; // default rendering
+        if (lang?.trim().toLowerCase() !== "mermaid") {
+          const highlighted = highlightCode(text, lang);
+          if (highlighted === null) return false; // default rendering
+          return `<pre><code class="hljs language-${highlighted.language}">${highlighted.html}</code></pre>\n`;
+        }
         const index = diagrams.push(text) - 1;
         return `<div class="md-diagram" ${DIAGRAM_INDEX_ATTR}="${index}"></div>\n`;
       },

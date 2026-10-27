@@ -6,6 +6,14 @@
   --mermaid-error-border: #e5484d;
   --mermaid-error-fg: #a4222a;
   --mermaid-muted: #6b6b6b;
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-number: #0550ae;
+  --hl-title: #8250df;
+  --hl-comment: #6e7781;
+  --hl-built-in: #953800;
+  --hl-addition: #116329;
+  --hl-deletion: #82071e;
 }
 
 :root[data-theme="dark"] {
@@ -16,6 +24,14 @@
   --mermaid-error-border: #e5484d;
   --mermaid-error-fg: #ff8a8a;
   --mermaid-muted: #9a9a9a;
+  --hl-keyword: #ff7b72;
+  --hl-string: #a5d6ff;
+  --hl-number: #79c0ff;
+  --hl-title: #d2a8ff;
+  --hl-comment: #8b949e;
+  --hl-built-in: #ffa657;
+  --hl-addition: #7ee787;
+  --hl-deletion: #ffa198;
 }
 
 /* Author display rules (flex/grid/block) beat the UA's [hidden], so without
@@ -345,6 +361,43 @@ body.fullscreen .document {
   padding: 0;
   background: none;
 }
+
+/* Token colors for highlight.js output; themed through the --hl-* variables. */
+.hljs-keyword,
+.hljs-doctag,
+.hljs-meta .hljs-keyword,
+.hljs-selector-tag { color: var(--hl-keyword); }
+.hljs-string,
+.hljs-regexp,
+.hljs-meta .hljs-string,
+.hljs-selector-attr,
+.hljs-selector-pseudo { color: var(--hl-string); }
+.hljs-number,
+.hljs-literal,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-symbol,
+.hljs-bullet { color: var(--hl-number); }
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-section,
+.hljs-name,
+.hljs-tag { color: var(--hl-title); }
+.hljs-built_in,
+.hljs-type,
+.hljs-params,
+.hljs-meta { color: var(--hl-built-in); }
+.hljs-comment,
+.hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-addition { color: var(--hl-addition); }
+.hljs-deletion { color: var(--hl-deletion); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
 
 .document blockquote {
   padding: 0 1em;
