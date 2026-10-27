@@ -18,6 +18,12 @@
   --mermaid-muted: #9a9a9a;
 }
 
+/* Author display rules (flex/grid/block) beat the UA's [hidden], so without
+   this an element with a display rule stays visible while "hidden". */
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -68,6 +74,11 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Stays on the right even when the zoom group (diagrams only) is hidden. */
+.toolbar-actions {
+  margin-left: auto;
 }
 
 .toolbar-group {
@@ -174,4 +185,216 @@ body {
   border-radius: 6px;
   padding: 8px;
   background: var(--mermaid-bg);
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+}
+
+.chevron {
+  transition: transform 0.12s ease;
+}
+
+.btn-icon[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
+}
+
+.split {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A small floating popover under the button: it overlays the canvas instead of
+   pushing it down, so opening it never resizes the widget or moves the diagram. */
+.target-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 6px;
+  width: min(280px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border: 1px solid var(--mermaid-border);
+  border-radius: 8px;
+  background: var(--mermaid-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.target-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.target-label {
+  flex: 0 0 40px;
+  font-size: 12px;
+  color: var(--mermaid-muted);
+}
+
+.target-select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--mermaid-fg);
+  background: var(--mermaid-bg);
+  border: 1px solid var(--mermaid-border);
+  border-radius: 6px;
+  padding: 5px 6px;
+}
+
+.target-select:disabled {
+  opacity: 0.6;
+}
+
+.target-status {
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--mermaid-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-status[data-kind="ok"] {
+  color: #3ecf6e;
+}
+
+.target-status[data-kind="error"] {
+  color: var(--mermaid-error-fg);
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* ---- Markdown documents -------------------------------------------------- */
+
+.document {
+  max-height: 640px;
+  overflow: auto;
+  padding: 4px 12px 12px;
+  border: 1px solid var(--mermaid-border);
+  border-radius: 8px;
+  background: var(--mermaid-bg);
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+body.fullscreen .document {
+  max-height: none;
+}
+
+.document > :first-child {
+  margin-top: 8px;
+}
+
+.document h1,
+.document h2,
+.document h3,
+.document h4 {
+  margin: 1.2em 0 0.5em;
+  line-height: 1.3;
+}
+
+.document h1 { font-size: 1.5em; }
+.document h2 { font-size: 1.28em; padding-bottom: 0.25em; border-bottom: 1px solid var(--mermaid-border); }
+.document h3 { font-size: 1.1em; }
+
+.document p,
+.document ul,
+.document ol,
+.document pre,
+.document blockquote,
+.document table {
+  margin: 0.6em 0;
+}
+
+.document ul,
+.document ol {
+  padding-left: 1.5em;
+}
+
+.document a {
+  color: #4493f8;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.document code {
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.document pre {
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.14);
+}
+
+.document pre code {
+  padding: 0;
+  background: none;
+}
+
+.document blockquote {
+  padding: 0 1em;
+  border-left: 3px solid var(--mermaid-border);
+  color: var(--mermaid-muted);
+}
+
+.document table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+.document th,
+.document td {
+  padding: 5px 10px;
+  border: 1px solid var(--mermaid-border);
+}
+
+.document th {
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.document img {
+  max-width: 100%;
+}
+
+.md-diagram {
+  margin: 0.8em 0;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.md-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.md-diagram-error {
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid var(--mermaid-error-border);
+  border-radius: 6px;
+  background: var(--mermaid-error-bg);
+  color: var(--mermaid-error-fg);
+  font-size: 12.5px;
+}
+
+.md-diagram-error pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  color: var(--mermaid-muted);
 }

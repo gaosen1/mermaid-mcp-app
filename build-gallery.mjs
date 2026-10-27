@@ -36,11 +36,12 @@ await fs.copyFile(
 );
 
 const files = await fs.readdir(RENDERS_DIR);
-const mmdFiles = files.filter((f) => f.endsWith(".mmd")).sort();
+const sourceFiles = files.filter((f) => f.endsWith(".mmd") || f.endsWith(".md")).sort();
 
 const cards = await Promise.all(
-  mmdFiles.map(async (fname) => {
-    const id = fname.replace(/\.mmd$/, "");
+  sourceFiles.map(async (fname) => {
+    const type = fname.endsWith(".md") ? "markdown" : "mermaid";
+    const id = fname.replace(/\.(mmd|md)$/, "");
     const filePath = path.join(RENDERS_DIR, fname);
     const [code, stat] = await Promise.all([fs.readFile(filePath, "utf-8"), fs.stat(filePath)]);
 
@@ -52,6 +53,7 @@ const cards = await Promise.all(
 
     return {
       id,
+      type,
       code,
       title: meta?.title ?? id,
       createdAt: meta?.createdAt ?? stat.mtime.toISOString(),
@@ -79,12 +81,16 @@ const cardsHtml = cards
 ${dayHeader}
     <section class="card">
       <header>
-        <span class="title">${escapeHtml(c.title)}</span>
+        <span class="title">${escapeHtml(c.title)}${c.type === "markdown" ? ' <span class="badge">Markdown</span>' : ""}</span>
         <span class="meta">${escapeHtml(c.createdAt)} · ${escapeHtml(c.id)}</span>
         <button class="copy-btn" data-id="${escapeHtml(c.id)}">复制源码</button>
       </header>
       <div class="diagram" id="diagram-${escapeHtml(c.id)}">
-        <pre class="mermaid">${escapeHtml(c.code)}</pre>
+        ${
+          c.type === "markdown"
+            ? `<pre class="md-source">${escapeHtml(c.code)}</pre>`
+            : `<pre class="mermaid">${escapeHtml(c.code)}</pre>`
+        }
       </div>
       <textarea class="source" id="source-${escapeHtml(c.id)}" hidden>${escapeHtml(c.code)}</textarea>
     </section>`;
@@ -107,6 +113,8 @@ const html = `<!DOCTYPE html>
   .card .meta { color: #6b6b6b; font-size: 11.5px; flex: 1; }
   .copy-btn { font-size: 12px; background: #1e1e1e; color: #e6e6e6; border: 1px solid #3a3a3a; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
   .copy-btn:hover { border-color: #9a9a9a; }
+  .badge { font-size: 11px; font-weight: 500; color: #9a9a9a; border: 1px solid #3a3a3a; border-radius: 4px; padding: 0 5px; margin-left: 6px; }
+  .md-source { margin: 0; white-space: pre-wrap; font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfcfcf; }
   .diagram { overflow-x: auto; }
   .diagram svg { max-width: 100%; }
 </style>

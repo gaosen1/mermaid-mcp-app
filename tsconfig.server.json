@@ -1,8 +1,12 @@
 {
   "compilerOptions": {
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "./dist",
@@ -14,5 +18,15 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["server.ts", "main.ts", "config.ts"]
+  "include": [
+    "server.ts",
+    "main.ts",
+    "config.ts",
+    "mermaid-local.ts",
+    "html-note.ts",
+    "renders.ts",
+    "bake.ts",
+    "src/targets.ts",
+    "src/content-type.ts"
+  ]
 }

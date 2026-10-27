@@ -14,7 +14,20 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { loadConfig } from "./config.js";
+import {
+  loadConfig,
+  normalizeWorkspace,
+  resolveImportTarget,
+  saveConfig,
+  withImportTarget,
+  workspaceLabel,
+} from "./config.js";
+import { importDiagram, listTargets, MermaidLocalError } from "./mermaid-local.js";
+import { bakeInitialState } from "./bake.js";
+import { HtmlNoteError, readHtmlNote, type HtmlNoteSource } from "./html-note.js";
+import { createRenderStore } from "./renders.js";
+import { CONTENT_TYPES } from "./src/content-type.js";
+import { describeTarget, normalizeFolderPath, type ImportTarget, type TargetProject } from "./src/targets.js";
 
 // Works both from source (server.ts, run via tsx) and compiled (dist/server.js).
 const DIST_DIR = import.meta.filename.endsWith(".ts")
@@ -56,117 +69,139 @@ const RESOURCE_URI = `ui://mermaid/viewer-${VIEW_VERSION}.html`;
 // old message is NOT documented by the ext-apps spec; this is an
 // experiment, verified by inspecting what the host actually requests.
 const RENDER_RESOURCE_URI_TEMPLATE = "ui://mermaid/viewer/{id}.html";
-const RENDERS_DIR = path.join(PROJECT_ROOT, "data", "renders");
-fsSync.mkdirSync(RENDERS_DIR, { recursive: true });
+const renders = createRenderStore(path.join(PROJECT_ROOT, "data", "renders"));
 
-const MAX_RENDER_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+interface ToolOutcome {
+  ok: boolean;
+  message: string;
+}
 
-/** Best-effort cleanup so data/renders/ doesn't grow forever. Never throws. */
-async function pruneOldRenders(): Promise<void> {
-  try {
-    const entries = await fs.readdir(RENDERS_DIR);
-    const now = Date.now();
-    await Promise.all(
-      entries.map(async (entry) => {
-        const filePath = path.join(RENDERS_DIR, entry);
-        const stat = await fs.stat(filePath).catch(() => null);
-        if (stat && now - stat.mtimeMs > MAX_RENDER_AGE_MS) {
-          await fs.unlink(filePath).catch(() => {});
-        }
-      }),
-    );
-  } catch {
-    // Directory listing failed; not worth failing the tool call over.
+const failure = (err: unknown): ToolOutcome => ({
+  ok: false,
+  message:
+    err instanceof MermaidLocalError || err instanceof HtmlNoteError
+      ? err.message
+      : `Mermaid Local 请求失败：${err instanceof Error ? err.message : String(err)}`,
+});
+
+/**
+ * Imports a persisted render into the user's Mermaid Local notes app. Errors
+ * come back as a message for the viewer rather than being thrown: this runs
+ * from a toolbar click with no retry/model loop around it.
+ */
+async function importRenderToMermaidLocal(id: string): Promise<ToolOutcome> {
+  const config = loadConfig();
+
+  const render = await renders.load(id);
+  if (render === null) {
+    return { ok: false, message: `找不到这次渲染的源码（id: ${id}），可能已经被清理。` };
   }
-}
+  const importTarget = resolveImportTarget(config, render.workspace);
 
-function renderIdToPath(id: string): string {
-  return path.join(RENDERS_DIR, `${id}.mmd`);
-}
-
-interface RenderMeta {
-  title?: string;
-  createdAt: string;
-}
-
-function renderMetaPath(id: string): string {
-  return path.join(RENDERS_DIR, `${id}.json`);
-}
-
-async function readRenderMeta(id: string): Promise<RenderMeta | null> {
-  return fs
-    .readFile(renderMetaPath(id), "utf-8")
-    .then((raw) => JSON.parse(raw) as RenderMeta)
-    .catch(() => null);
+  try {
+    await importDiagram(config.agentApiBaseUrl, {
+      name: render.title || id,
+      type: render.type,
+      source: render.source,
+      target: importTarget,
+    });
+  } catch (err) {
+    return failure(err);
+  }
+  return {
+    ok: true,
+    message: `已投递到 Mermaid Local 的「${describeTarget(importTarget)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。`,
+  };
 }
 
 /**
- * Imports a persisted render into the user's Mermaid Local notes app via its
- * local `agent-api.mjs` REST server (see that script's own header comment
- * for the full protocol). Returns a user-facing message either way; errors
- * are reported back to the View rather than thrown, since this runs from a
- * toolbar click with no retry/model loop around it.
+ * Imports an HTML page straight into Mermaid Local, at the import target of
+ * the workspace it came from. No render and no button: the model only calls
+ * this when the user has already said "keep this one".
  */
-async function importRenderToMermaidLocal(id: string): Promise<{ ok: boolean; message: string }> {
+async function saveHtmlNote(
+  title: string,
+  workspace: string,
+  source: HtmlNoteSource,
+): Promise<ToolOutcome> {
   const config = loadConfig();
-  const base = config.agentApiBaseUrl.replace(/\/+$/, "");
-
-  const code = await fs.readFile(renderIdToPath(id), "utf-8").catch(() => null);
-  if (code === null) {
-    return { ok: false, message: `找不到这次渲染的源码（id: ${id}），可能已经被清理。` };
-  }
-  const name = (await readRenderMeta(id))?.title || id;
-
-  let token: string;
+  const target = resolveImportTarget(config, normalizeWorkspace(workspace));
   try {
-    const tokenRes = await fetch(`${base}/api/auth/token`);
-    if (!tokenRes.ok) throw new Error(`HTTP ${tokenRes.status}`);
-    const tokenBody = (await tokenRes.json()) as { token?: string };
-    if (typeof tokenBody.token !== "string") throw new Error("响应里没有 token 字段");
-    token = tokenBody.token;
+    const html = await readHtmlNote(source);
+    await importDiagram(config.agentApiBaseUrl, { name: title, type: "html", source: html, target });
   } catch (err) {
+    return failure(err);
+  }
+  return {
+    ok: true,
+    message: `已把「${title}」投递到 Mermaid Local 的「${describeTarget(target)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。`,
+  };
+}
+
+interface ImportTargetsOutcome extends ToolOutcome {
+  current: ImportTarget;
+  /** Name of the workspace `current` belongs to; "" = the fallback shared by workspaces without their own. */
+  scope: string;
+  projects: TargetProject[];
+}
+
+const scopeOf = (workspace: string | null) => (workspace ? workspaceLabel(workspace) : "");
+
+/**
+ * What the viewer's picker shows for one render: the import target in force for
+ * the workspace that made it, plus everything Mermaid Local currently has.
+ */
+async function readImportTargets(id: string): Promise<ImportTargetsOutcome> {
+  const config = loadConfig();
+  const render = await renders.load(id);
+  const current = resolveImportTarget(config, render?.workspace ?? null);
+  const scope = scopeOf(render?.workspace ?? null);
+  try {
+    return { ok: true, message: "", current, scope, projects: await listTargets(config.agentApiBaseUrl) };
+  } catch (err) {
+    return { ...failure(err), current, scope, projects: [] };
+  }
+}
+
+/** Saves the target for the workspace that made render `id` — other workspaces are untouched. */
+async function writeImportTarget(
+  id: string,
+  project: string,
+  folderPath: string,
+): Promise<ToolOutcome & { current: ImportTarget }> {
+  const render = await renders.load(id);
+  if (render === null) {
     return {
       ok: false,
-      message: `连不上 Mermaid Local 的本地同步服务（${base}）。请确认 Mermaid Local 正在运行（pnpm dev / pnpm preview 会自动启动这个同步服务），并且已在它的 Web 应用里选过「本地 Agent 同步」目录。原始错误：${err instanceof Error ? err.message : String(err)}`,
+      message: `找不到这次渲染（id: ${id}），无法确定它属于哪个工作目录。`,
+      current: resolveImportTarget(loadConfig(), null),
     };
   }
-
-  try {
-    const res = await fetch(`${base}/api/diagrams`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ name, type: "mermaid", source: code, projectName: config.defaultProjectName }),
-    });
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      return { ok: false, message: body.error ?? `导入失败：HTTP ${res.status}` };
-    }
-    return { ok: true, message: `已投递到 Mermaid Local 的「${config.defaultProjectName}」项目：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。` };
-  } catch (err) {
-    return { ok: false, message: `导入请求失败：${err instanceof Error ? err.message : String(err)}` };
-  }
+  const current: ImportTarget = { project: project.trim(), folderPath: normalizeFolderPath(folderPath) };
+  saveConfig(withImportTarget(loadConfig(), render.workspace, current));
+  const scope = scopeOf(render.workspace);
+  return {
+    ok: true,
+    message: `${scope ? `「${scope}」的` : ""}默认导入位置已设为「${describeTarget(current)}」`,
+    current,
+  };
 }
 
-/** Injects the persisted Mermaid source (plus its title, and its id so the View can later
- * call back with `import_to_mermaid_local`) into the generic HTML shell, so
- * the View can render immediately on load without waiting on (or depending
- * on) tool-input/tool-result notifications from the host. */
-function bakeCodeIntoHtml(html: string, code: string, id: string, title: string | null): string {
-  const script = `<script>window.__MERMAID_INITIAL_CODE__=${JSON.stringify(code)};window.__MERMAID_INITIAL_ID__=${JSON.stringify(id)};window.__MERMAID_INITIAL_TITLE__=${JSON.stringify(title)};</script>`;
-  return html.includes("</head>") ? html.replace("</head>", `${script}</head>`) : script + html;
-}
-
-const RENDER_MERMAID_DESCRIPTION = `Render a Mermaid diagram inline in the conversation as an interactive, visual chart (not a code block).
+const RENDER_MERMAID_DESCRIPTION = `Render a Mermaid diagram — or a Markdown document with Mermaid diagrams embedded in it — inline in the conversation as an interactive, visual result (not a code block).
 
 When to call this tool:
 - The explanation involves a flowchart, sequence diagram, architecture/component diagram, state diagram, ER diagram, class diagram, Gantt chart, or any other relationship/process that Mermaid can express and a picture would make clearer than prose.
 - Prefer calling this tool over simply printing a \`\`\`mermaid code fence, whenever the host supports rendering it — the user sees an actual rendered diagram, not source text.
+- Use \`type: "markdown"\` when the diagram can't stand on its own: a bare diagram is often too abstract to keep as a note, and a few sentences of context beside it make it useful later. Write a short document — headings, lists, tables, prose — with the diagram(s) in \`\`\`mermaid fences, and it is rendered with the diagrams drawn in place.
 
 Input contract:
-- Pass ONLY the raw Mermaid diagram source as \`code\` (e.g. starting with "flowchart", "sequenceDiagram", "classDiagram", "erDiagram", "stateDiagram-v2", "gantt", etc.). Do not wrap it in a markdown code fence and do not include any other prose in \`code\`.
-- Always also pass \`title\` (required): a short (under ~60 chars) human-readable label for what this diagram is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). It is shown in the top bar of the rendered diagram, and it becomes the name of the diagram when the user imports it into their notes (Mermaid Local) and labels it in the local gallery, so make it specific and meaningful rather than generic.
+- \`type\` (optional, default "mermaid"): "mermaid" or "markdown". It decides what \`code\` is, and what the user gets when they import the result into their notes (Mermaid Local).
+- type "mermaid": pass ONLY the raw Mermaid diagram source as \`code\` (e.g. starting with "flowchart", "sequenceDiagram", "classDiagram", "erDiagram", "stateDiagram-v2", "gantt", etc.). Do not wrap it in a markdown code fence and do not include any other prose in \`code\`.
+- type "markdown": pass the whole Markdown document as \`code\`. Put each diagram in its own \`\`\`mermaid fence; do not wrap the document itself in a fence. Keep the prose tight and in the language the user is writing in.
+- Always also pass \`workspace\` (required): the absolute path of your session's primary working directory (the project the user is working in), exactly as your environment reports it. The viewer remembers where the user wants diagrams imported separately for each workspace, so pass the same path for every call in a session; do not make one up or use a subfolder.
+- Always also pass \`title\` (required): a short (under ~60 chars) human-readable label for what this is about (e.g. "会议 Runtime 冷启动时序" or "登录鉴权流程"). It is shown in the top bar of the rendered result, and it becomes the name of the note when the user imports it into their notes (Mermaid Local) and labels it in the local gallery, so make it specific and meaningful rather than generic.
 
-Layout: the viewer always uses the dagre layout, which follows natural reading order. Do not set \`layout: elk\` or other layout engines in frontmatter/directives — they are ignored.\n\nStyling (use this — don't just default to plain rectangles):
+Layout (every Mermaid diagram, including those inside a markdown document): the viewer always uses the dagre layout, which follows natural reading order. Do not set \`layout: elk\` or other layout engines in frontmatter/directives — they are ignored.\n\nStyling (use this — don't just default to plain rectangles):
 - Match node SHAPE to its semantic role wherever the diagram type supports it. In flowcharts: \`([text])\` stadium for start/end, \`{text}\` diamond for a decision/branch, \`[(text)]\` cylinder for a database/store, \`[[text]]\` subroutine for a predefined/external process, \`[/text/]\` parallelogram for input/output, \`{{text}}\` hexagon for a preparation/config step, plain \`[text]\` rectangle for an ordinary step.
 - Highlight the 1–3 nodes that actually matter for the point being made (e.g. the failure branch, the final state, the bottleneck) with distinct color via \`classDef\` + \`class\`, for example:
   \`classDef danger fill:#4a1f24,stroke:#e5484d,color:#fff\`
@@ -179,6 +214,23 @@ Dependency isolation (important):
 - This tool renders the diagram entirely inside its own MCP App UI. All rendering dependencies (Mermaid, etc.) are bundled and managed by this MCP server itself.
 - Never install mermaid, echarts, chart.js, or any other charting/rendering package into the user's current project to satisfy a visualization need — that is never necessary and must be avoided.
 - Never modify the user's project package.json (or lockfile) in order to draw a diagram. If a diagram is needed, call this tool instead.`;
+
+const SAVE_HTML_DESCRIPTION = `Save an HTML page the user has ALREADY seen — typically an interactive visualization published earlier in this conversation as an artifact/web page — into the user's local notes app (Mermaid Local) as an HTML note.
+
+When to call this tool:
+- ONLY when the user explicitly asks to save / keep / import / persist an existing HTML page into Mermaid Local (e.g. "把这个可视化存到 Mermaid Local").
+- Never call it to create, show or preview a visualization. Keep making HTML visualizations the way you normally do (the host's own artifacts / web pages); this tool renders nothing — it only files a page the user decided is worth keeping.
+- Do not use it for Mermaid diagrams or Markdown notes; render_mermaid covers those and imports them from its own viewer.
+
+Input contract:
+- Pass exactly one of \`path\` and \`html\`:
+  - \`path\` (preferred whenever the page exists as a local file, e.g. the file you published an artifact from): absolute path to the .html file. It is read as-is, so the saved note is the exact page, and you don't have to re-send it.
+  - \`html\`: the page's complete, self-contained HTML document, exactly as published (same scripts, styles and data) — use this only when there is no local file and no way to get one, e.g. a page made in a chat. Do not trim, summarize or "improve" it.
+- If the user points at a published artifact link (e.g. a claude.ai artifact URL) or at a page from an earlier conversation, and you have no local copy: first read it with whatever tool you have for published artifacts so that it is saved to a local .html file, then pass that file as \`path\`. Do not paste the page into \`html\` when a file can be had — re-typing a whole page costs far more than reading it once.
+- \`title\` (required): short, specific name for the note (e.g. "两数之和 · 哈希表查找过程"). It becomes the note's name in Mermaid Local.
+- \`workspace\` (required): the absolute path of your session's primary working directory, exactly as your environment reports it — the same value you pass to render_mermaid. It picks where in Mermaid Local the note lands.
+
+The result says where the note was filed, or why it couldn't be; relay that to the user.`;
 
 /**
  * Creates a new MCP server instance with the render_mermaid tool and its UI resource registered.
@@ -199,47 +251,59 @@ export function createServer(): McpServer {
       inputSchema: z.object({
         code: z
           .string()
-          .min(1, "code must be non-empty Mermaid diagram source")
-          .describe("Raw Mermaid diagram source, e.g. 'flowchart LR\\nA-->B'"),
+          .min(1, "code must be non-empty")
+          .describe(
+            "What to render. For type 'mermaid' (the default): the raw Mermaid source, e.g. 'flowchart LR\\nA-->B'. For type 'markdown': a Markdown document whose ```mermaid fences are drawn inline.",
+          ),
+        // Optional with a default (unlike title) on purpose: the safe reading of
+        // a call without it is the original behaviour — a Mermaid diagram — and
+        // a session still holding an older tool schema must keep working.
+        type: z
+          .enum(CONTENT_TYPES)
+          .optional()
+          .describe("'mermaid' (default): `code` is a diagram. 'markdown': `code` is a document with ```mermaid fences."),
+        // Required, not guessed server-side: the host runs one server process
+        // for every session and its `roots` are the union of all of their
+        // workspaces, so only the model knows which session this call is in.
+        workspace: z
+          .string()
+          .trim()
+          .min(1, "workspace must be the session's working directory")
+          .describe("Absolute path of this session's primary working directory, e.g. '/Users/me/projects/app'"),
         // Required: the title becomes the item name when a render is imported
         // into Mermaid Local, so leaving it to the model's discretion produced
         // id-named notes whenever a call skipped it.
         title: z
           .string()
           .min(1, "title must be a short non-empty label")
-          .describe("Short human-readable label for what this diagram is about, e.g. '会议 Runtime 冷启动时序'"),
+          .describe("Short human-readable label for what this is about, e.g. '会议 Runtime 冷启动时序'"),
       }),
       outputSchema: z.object({
         code: z.string(),
         id: z.string(),
         title: z.string(),
+        type: z.enum(CONTENT_TYPES),
       }),
       _meta: { ui: { resourceUri: RESOURCE_URI } }, // Links this tool to its UI resource
     },
-    async ({ code, title }): Promise<CallToolResult> => {
+    async ({ code, title, workspace, type = "mermaid" }): Promise<CallToolResult> => {
       // Validation of the Mermaid syntax itself happens client-side in the
       // View (mermaid.parse), since Mermaid's parser only runs in a DOM
       // environment. The tool's job is just to hand the source to the UI;
       // a short text fallback keeps non-MCP-Apps hosts informed.
-
-      const id = crypto.randomUUID();
-      const meta: RenderMeta = { title, createdAt: new Date().toISOString() };
-      await Promise.all([
-        fs.writeFile(renderIdToPath(id), code, "utf-8"),
-        fs.writeFile(renderMetaPath(id), JSON.stringify(meta, null, 2), "utf-8"),
-      ]);
-      void pruneOldRenders();
+      const { id } = await renders.save({ type, source: code, title, workspace: normalizeWorkspace(workspace) });
+      void renders.prune();
 
       const callResourceUri = RENDER_RESOURCE_URI_TEMPLATE.replace("{id}", id);
+      const lines = code.split("\n").length;
+      const fallback =
+        type === "markdown"
+          ? `Rendered a Markdown document (${lines} lines). Source:\n\n${code}`
+          : `Rendered a Mermaid diagram (${lines} lines). Source:\n\`\`\`mermaid\n${code}\n\`\`\``;
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `Rendered a Mermaid diagram (${code.split("\n").length} lines). Source:\n\`\`\`mermaid\n${code}\n\`\`\``,
-          },
-        ],
-        structuredContent: { code, id, title },
+        content: [{ type: "text", text: fallback }],
+        structuredContent: { code, id, title, type },
         // Both forms set since it's undocumented which one (if either) a
         // given host honors on a *result* rather than a *tool*.
         _meta: {
@@ -250,33 +314,102 @@ export function createServer(): McpServer {
     },
   );
 
-  // App-only tool (visibility: ["app"]): wired to the View's "导入 Mermaid
-  // Local" toolbar button, never callable by the model. Deliberately a
-  // separate tool rather than a render_mermaid side-effect — importing is a
-  // human "this one's worth keeping" decision, not something that should
-  // happen automatically on every render.
+  // Model-visible but deliberately NOT a render_mermaid type and not an app
+  // tool: HTML visualizations stay on the host's own artifact path, and this
+  // only files one into Mermaid Local once the user asks to keep it.
+  server.registerTool(
+    "save_html_note",
+    {
+      title: "Save HTML page to Mermaid Local",
+      description: SAVE_HTML_DESCRIPTION,
+      inputSchema: z.object({
+        title: z.string().trim().min(1, "title must be a short non-empty label").describe("Name of the note, e.g. '两数之和 · 哈希表查找过程'"),
+        workspace: z
+          .string()
+          .trim()
+          .min(1, "workspace must be the session's working directory")
+          .describe("Absolute path of this session's primary working directory, e.g. '/Users/me/projects/app'"),
+        path: z.string().optional().describe("Absolute path of a local .html file holding the page. Pass this or `html`, not both."),
+        html: z.string().optional().describe("The page's complete HTML document, verbatim. Pass this or `path`, not both."),
+      }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+    },
+    async ({ title, workspace, path: file, html }): Promise<CallToolResult> => {
+      const result = await saveHtmlNote(title, workspace, { path: file, html });
+      return { content: [{ type: "text", text: result.message }], structuredContent: result, isError: !result.ok };
+    },
+  );
+
+  // App-only tools (visibility: ["app"]): wired to the viewer's "→ Mermaid
+  // Local" button and its target picker, never callable by the model.
+  // Importing is deliberately a separate, explicit tool rather than a
+  // render_mermaid side-effect: it is a human "this one's worth keeping"
+  // decision, not something that should happen on every render.
+  const appOnly = { ui: { resourceUri: RESOURCE_URI, visibility: ["app"] } };
+  const renderIdSchema = z.string().min(1).describe("The render id of the diagram (same id as in its resourceUri)");
+
   registerAppTool(
     server,
     "import_to_mermaid_local",
     {
       title: "Import to Mermaid Local",
       description:
-        "App-only: copies a previously rendered diagram into the user's Mermaid Local notes app via its local agent-sync API. Never call this yourself — it's wired to a toolbar button in the viewer.",
+        "App-only: copies a previously rendered diagram into the user's Mermaid Local notes app, at their chosen default project/folder. Never call this yourself — it's wired to a toolbar button in the viewer.",
       inputSchema: z.object({
-        id: z.string().min(1).describe("The render id of the diagram to import (same id as in its resourceUri)"),
+        id: renderIdSchema,
       }),
-      outputSchema: z.object({
-        ok: z.boolean(),
-        message: z.string(),
-      }),
-      _meta: { ui: { resourceUri: RESOURCE_URI, visibility: ["app"] } },
+      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+      _meta: appOnly,
     },
     async ({ id }): Promise<CallToolResult> => {
       const result = await importRenderToMermaidLocal(id);
-      return {
-        content: [{ type: "text", text: result.message }],
-        structuredContent: result,
-      };
+      return { content: [{ type: "text", text: result.message }], structuredContent: result };
+    },
+  );
+
+  const targetSchema = z.object({ project: z.string(), folderPath: z.string() });
+
+  registerAppTool(
+    server,
+    "list_import_targets",
+    {
+      title: "List Mermaid Local import targets",
+      description:
+        "App-only: the projects and folders in the user's Mermaid Local plus the saved default import target of the workspace that made render `id`. Never call this yourself — it feeds the viewer's target picker.",
+      inputSchema: z.object({ id: renderIdSchema }),
+      outputSchema: z.object({
+        ok: z.boolean(),
+        message: z.string(),
+        current: targetSchema,
+        scope: z.string(),
+        projects: z.array(z.object({ name: z.string(), folders: z.array(z.string()) })),
+      }),
+      _meta: appOnly,
+    },
+    async ({ id }): Promise<CallToolResult> => {
+      const result = await readImportTargets(id);
+      return { content: [{ type: "text", text: result.message || "ok" }], structuredContent: { ...result } };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "set_import_target",
+    {
+      title: "Set Mermaid Local import target",
+      description:
+        "App-only: saves the default project/folder that \"→ Mermaid Local\" imports into, for the workspace that made render `id` only. Never call this yourself — it's wired to the viewer's target picker.",
+      inputSchema: z.object({
+        id: renderIdSchema,
+        project: z.string().trim().min(1).describe("Mermaid Local project name (created on import if it doesn't exist)"),
+        folderPath: z.string().describe("Folder path inside the project, e.g. \"多模态/对比学习\"; empty string = project root"),
+      }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string(), current: targetSchema }),
+      _meta: appOnly,
+    },
+    async ({ id, project, folderPath }): Promise<CallToolResult> => {
+      const result = await writeImportTarget(id, project, folderPath);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result } };
     },
   );
 
@@ -306,11 +439,10 @@ export function createServer(): McpServer {
     { mimeType: RESOURCE_MIME_TYPE },
     async (uri, variables): Promise<ReadResourceResult> => {
       const id = Array.isArray(variables.id) ? variables.id[0] : variables.id;
-      const code = id ? await fs.readFile(renderIdToPath(id), "utf-8").catch(() => null) : null;
+      const render = id ? await renders.load(id) : null;
 
       const shell = await fs.readFile(MCP_APP_HTML_PATH, "utf-8");
-      const title = id ? ((await readRenderMeta(id))?.title ?? null) : null;
-      const html = code !== null && id ? bakeCodeIntoHtml(shell, code, id, title) : shell;
+      const html = render ? bakeInitialState(shell, render) : shell;
 
       return {
         contents: [{ uri: uri.toString(), mimeType: RESOURCE_MIME_TYPE, text: html }],

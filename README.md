@@ -31,10 +31,18 @@ Enable once: **Claude menu → Help → Troubleshooting → Enable Developer Mod
 
 | File | Role |
 |---|---|
-| `server.ts` | MCP server: registers the `render_mermaid` tool and its `ui://mermaid/viewer-*` UI resource |
+| `server.ts` | MCP server: registers `render_mermaid` (+ its `ui://mermaid/viewer-*` UI resource), `save_html_note`, and the app-only import / target-picker tools |
+| `renders.ts` | On-disk store for each render (`<id>.mmd` / `<id>.md` + `<id>.json` sidecar) |
+| `bake.ts` | Injects a render's state into the viewer HTML for the per-call page |
+| `mermaid-local.ts` | Client for Mermaid Local's `agent-api` (list projects/folders, import a diagram) |
+| `html-note.ts` | Reads the page for `save_html_note` from inline `html` or a local `path`, with size/shape checks |
+| `config.ts` / `configure.mjs` | Persisted import target + agent-api URL, and the CLI that edits them |
 | `main.ts` | Process entry point — stdio transport by default (what Claude Desktop uses), `--http` for local testing |
 | `mcp-app.html` | View shell (the UI resource's HTML) |
-| `src/mcp-app.ts` | View logic: connects to the host, renders Mermaid client-side, pan/zoom/copy/fullscreen |
+| `src/mcp-app.ts` | View logic: connects to the host, renders Mermaid client-side, pan/zoom/copy/fullscreen/import |
+| `src/extract.ts` | Reads source/type/id/title out of a live or replayed tool result |
+| `src/markdown.ts`, `src/content-type.ts` | Markdown → HTML with ```mermaid fences held out as placeholders; the `mermaid`/`markdown` type |
+| `src/target-panel.ts`, `src/target-options.ts`, `src/targets.ts` | The ▾ import-location picker (DOM, option building, shared types) |
 | `src/mcp-app.css` | View styling (light/dark, follows host theme) |
 | `vite.config.ts` | Bundles the View (Mermaid included) into a single self-contained `dist/mcp-app.html` |
 
@@ -46,6 +54,61 @@ pnpm run build
 ```
 
 `dist/` is gitignored (it's a build artifact), so after cloning or `git clean` you must run `pnpm run build` before the `mermaid` entry in `claude_desktop_config.json` will work — it points directly at `dist/main.js`.
+
+## Diagrams and documents
+
+`render_mermaid` takes a `type`:
+
+- `mermaid` (default): `code` is a Mermaid diagram, drawn with pan/zoom.
+- `markdown`: `code` is a Markdown document. Its ```` ```mermaid ```` fences are drawn inline, so a note can carry a few
+  sentences of context next to the picture (a bare diagram is often too abstract to keep). Headings, lists, tables, code
+  and links work; raw HTML is sanitized, links open through the host, and one bad diagram only breaks itself.
+
+`title` is required for both. Importing sends the same `type` to Mermaid Local, so a document arrives as a Markdown note.
+
+## Importing into Mermaid Local
+
+The viewer's **→ Mermaid Local** button copies the diagram or document (named by its `title`) into the
+[Mermaid Local](https://github.com/gaosen1/mermaid) notes app through its `agent-api` inbox. Mermaid Local
+must be running (`pnpm dev` / `pnpm preview` start the sync service) with a "local agent sync" folder chosen.
+
+Where it lands is a project plus a folder path inside it (empty = project root), and it is remembered **per
+workspace**. `render_mermaid` takes a required `workspace` (the session's working directory, which the model fills
+in from its environment — Claude Desktop runs one server process for every session and its MCP `roots` are all
+sessions' workspaces mixed together, so the server can't tell them apart itself). The **▾** button next to the
+import button picks the target for the workspace that drew *this* diagram: two dropdowns, saved as soon as you
+change one, used for every later diagram from that workspace, and independent of every other workspace. A
+workspace you haven't picked for follows the shared default (`LLM`, project root, unless changed).
+
+From a shell (run `pnpm run build` first):
+
+```bash
+node configure.mjs get
+node configure.mjs set-target LLM "多模态与跨模态/对比学习"                      # shared default; omit the folder for the project root
+node configure.mjs set-target 医联 会议 --workspace /Users/me/WORKSPACE/yi-lian   # one workspace
+node configure.mjs set-url http://127.0.0.1:4789
+```
+
+The choices live in `mermaid-local-config.json` (git-ignored). A project or folder that doesn't exist yet is created
+on import. `title` is required by `render_mermaid` because it becomes the diagram's name in Mermaid Local.
+
+## Saving HTML pages
+
+`save_html_note` files an HTML page — typically an interactive visualization Claude already published as
+an artifact — into Mermaid Local as an `html` note. It is deliberately **not** a `render_mermaid` type: it renders
+nothing, and its description tells the model to keep making visualizations through the host's own artifacts and to
+call this tool only when you ask to keep a page ("把这个可视化存到 Mermaid Local"). There is no button to click — the
+request is the decision — and the note lands at the same per-workspace import target as diagrams.
+
+The page arrives one of two ways (exactly one per call):
+
+- `path`: absolute path of a local `.html` file, e.g. the file a Code-tab artifact was published from. Read as-is,
+  and the model doesn't re-send the page.
+- `html`: the full document, inline. Needed for pages made in a chat, which exist only in the conversation; costs as
+  many output tokens as the page is long.
+
+Pages are capped at 4 MB (agent-api's body limit is 5 MB). Pages that load libraries from a CDN still need network
+access when opened in Mermaid Local. Requires a Mermaid Local whose inbox accepts `html` notes.
 
 ## Making changes
 

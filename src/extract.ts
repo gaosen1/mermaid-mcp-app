@@ -1,7 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/client";
+import { parseContentType, type ContentType } from "./content-type";
 
 export interface RenderPayload {
+  /** The source: Mermaid diagram text, or a Markdown document when `type` is "markdown". */
   code: string;
+  type: ContentType;
   id: string | null;
   title: string | null;
 }
@@ -12,14 +15,14 @@ function nonEmptyString(value: unknown): string | null {
 
 function fromRecord(value: unknown): RenderPayload | null {
   if (!value || typeof value !== "object") return null;
-  const { code, id, title } = value as { code?: unknown; id?: unknown; title?: unknown };
+  const { code, id, title, type } = value as { code?: unknown; id?: unknown; title?: unknown; type?: unknown };
   const source = nonEmptyString(code);
   if (!source) return null;
-  return { code: source, id: nonEmptyString(id), title: nonEmptyString(title) };
+  return { code: source, type: parseContentType(type), id: nonEmptyString(id), title: nonEmptyString(title) };
 }
 
 /**
- * Reads the diagram source (plus render id and title) out of a tool result.
+ * Reads the source (plus content type, render id and title) out of a tool result.
  *
  * Live results carry `structuredContent`. A host replaying a saved
  * conversation does not: Claude's Code tab drops `structuredContent` and
@@ -45,7 +48,7 @@ export function extractPayload(result: CallToolResult): RenderPayload | null {
 
   for (const text of texts) {
     const fenced = text.match(/```mermaid\n([\s\S]*?)\n```/)?.[1];
-    if (fenced) return { code: fenced, id: null, title: null };
+    if (fenced) return { code: fenced, type: "mermaid", id: null, title: null };
   }
   return null;
 }

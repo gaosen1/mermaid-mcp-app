@@ -16,7 +16,12 @@ import {
   applyHostFonts,
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
+import DOMPurify from "dompurify";
+import { parseContentType, type ContentType } from "./content-type";
 import { extractPayload } from "./extract";
+import { DIAGRAM_INDEX_ATTR, renderMarkdown } from "./markdown";
+import { initTargetPanel } from "./target-panel";
+import { describeTarget } from "./targets";
 import mermaid from "mermaid";
 import "./mcp-app.css";
 
@@ -31,6 +36,7 @@ declare global {
     __MERMAID_INITIAL_CODE__?: string;
     __MERMAID_INITIAL_ID__?: string;
     __MERMAID_INITIAL_TITLE__?: string | null;
+    __MERMAID_INITIAL_TYPE__?: string;
   }
 }
 
@@ -43,7 +49,10 @@ const zoomLevelEl = document.getElementById("zoom-level")!;
 const fullscreenBtn = document.getElementById("fullscreen-btn") as HTMLButtonElement;
 const copyBtn = document.getElementById("copy-btn") as HTMLButtonElement;
 const importBtn = document.getElementById("import-btn") as HTMLButtonElement;
+const targetBtn = document.getElementById("target-btn") as HTMLButtonElement;
 const diagramTitleEl = document.getElementById("diagram-title")!;
+const zoomGroupEl = document.getElementById("zoom-group")!;
+const documentEl = document.getElementById("document")!;
 const viewportEl = document.getElementById("viewport")!;
 const panZoomEl = document.getElementById("pan-zoom")!;
 const errorEl = document.getElementById("error")!;
@@ -52,7 +61,8 @@ const errorSourceEl = document.getElementById("error-source-code")!;
 const errorSourceDetailsEl = document.getElementById("error-source-details")!;
 
 let renderCount = 0;
-let lastCode: string | null = null;
+let lastSource: string | null = null;
+let lastType: ContentType = "mermaid";
 let lastId: string | null = null;
 let lastTitle: string | null = null;
 
@@ -328,9 +338,9 @@ function flashCopyLabel(text: string, revertAfterMs = 1600) {
 }
 
 async function copySource() {
-  if (!lastCode) return;
+  if (!lastSource) return;
 
-  const ok = (await tryClipboardApi(lastCode)) || tryExecCommand(lastCode);
+  const ok = (await tryClipboardApi(lastSource)) || tryExecCommand(lastSource);
 
   if (ok) {
     flashCopyLabel("已复制 ✓");
@@ -340,7 +350,7 @@ async function copySource() {
     // window.prompt's text field is a native OS control, unaffected by that
     // policy, and needs no permanent on-page space: the user can select-all
     // and Cmd/Ctrl+C from it directly.
-    window.prompt("无法直接写入剪贴板，请手动复制以下内容：", lastCode);
+    window.prompt("无法直接写入剪贴板，请手动复制以下内容：", lastSource);
   }
 }
 copyBtn.addEventListener("click", () => void copySource());
@@ -348,18 +358,18 @@ copyBtn.addEventListener("click", () => void copySource());
 // ---- Import to Mermaid Local --------------------------------------------
 
 const IMPORT_LABEL = "→ Mermaid Local";
-const IMPORT_TITLE = "复制这张图到 Mermaid Local 笔记";
+let importTitle = "复制这张图到 Mermaid Local 笔记";
 let importFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
 // The sandboxed frame has no usable prompt()/console, so the outcome shows on
 // the button itself; the full message (esp. a failure reason) is its tooltip.
 function flashImportLabel(text: string, detail?: string, revertAfterMs = 2400) {
   importBtn.textContent = text;
-  importBtn.title = detail ?? IMPORT_TITLE;
+  importBtn.title = detail ?? importTitle;
   clearTimeout(importFeedbackTimer);
   importFeedbackTimer = setTimeout(() => {
     importBtn.textContent = IMPORT_LABEL;
-    importBtn.title = IMPORT_TITLE;
+    importBtn.title = importTitle;
     importBtn.disabled = false;
   }, revertAfterMs);
 }
@@ -394,6 +404,7 @@ let currentDisplayMode: string | undefined;
 function updateFullscreenButton(ctx: McpUiHostContext) {
   const available = ctx.availableDisplayModes ?? [];
   currentDisplayMode = ctx.displayMode;
+  if (ctx.displayMode) document.body.classList.toggle("fullscreen", ctx.displayMode === "fullscreen");
   if (available.includes("fullscreen")) {
     fullscreenBtn.hidden = false;
     fullscreenBtn.textContent = currentDisplayMode === "fullscreen" ? "⤡ 退出全屏" : "⤢ 全屏";
@@ -413,39 +424,47 @@ fullscreenBtn.addEventListener("click", async () => {
 
 // ---- Rendering ------------------------------------------------------------
 
+const panels = {
+  status: statusEl,
+  toolbar: toolbarEl,
+  title: diagramTitleEl,
+  viewport: viewportEl,
+  document: documentEl,
+  error: errorEl,
+};
+
+/** Exactly these panels are visible; every other one is hidden. */
+function showPanels(visible: Array<keyof typeof panels>) {
+  for (const [name, el] of Object.entries(panels)) {
+    el.hidden = !visible.includes(name as keyof typeof panels);
+  }
+}
+
+/** The result panels (a diagram or a document) share the toolbar and the title row. */
+function showResult(body: "viewport" | "document") {
+  zoomGroupEl.hidden = body === "document"; // zoom/fit is for diagrams, not text
+  diagramTitleEl.textContent = lastTitle ?? "";
+  diagramTitleEl.title = lastTitle ?? "";
+  showPanels(lastTitle ? ["toolbar", "title", body] : ["toolbar", body]);
+}
+
 function showStatus(text: string) {
   statusEl.textContent = text;
-  statusEl.hidden = false;
-  toolbarEl.hidden = true;
-  diagramTitleEl.hidden = true;
-  viewportEl.hidden = true;
-  errorEl.hidden = true;
+  showPanels(["status"]);
 }
 
 function showError(message: string, code: string) {
-  statusEl.hidden = true;
-  toolbarEl.hidden = true;
-  diagramTitleEl.hidden = true;
-  viewportEl.hidden = true;
-  errorEl.hidden = false;
   errorMessageEl.textContent = message;
   errorSourceEl.textContent = code;
   // Nothing to show for the "host never delivered a tool result" case — an
   // empty, expandable "Diagram source" block there would just be confusing.
   errorSourceDetailsEl.hidden = code.length === 0;
+  showPanels(["error"]);
 }
 
 function showDiagram(svg: string) {
-  statusEl.hidden = true;
-  errorEl.hidden = true;
-  toolbarEl.hidden = false;
-  viewportEl.hidden = false;
-
-  diagramTitleEl.textContent = lastTitle ?? "";
-  diagramTitleEl.title = lastTitle ?? "";
-  diagramTitleEl.hidden = !lastTitle;
-
   panZoomEl.innerHTML = svg;
+  showResult("viewport");
 
   // Wait a frame so the viewport has real layout dimensions before fitting.
   // The host's own container can still be settling its width right after
@@ -459,21 +478,76 @@ function showDiagram(svg: string) {
   });
 }
 
-async function renderMermaid(code: string) {
-  lastCode = code;
-  showStatus("Rendering diagram…");
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+async function drawMermaid(code: string): Promise<string> {
+  // Validates syntax up front so parse errors surface with Mermaid's own
+  // message rather than a generic render failure.
+  await mermaid.parse(code);
+  const { svg } = await mermaid.render(`mermaid-view-${++renderCount}`, code);
+  return svg;
+}
+
+async function renderMermaid(code: string) {
   try {
-    // Validates syntax up front so parse errors surface with Mermaid's own
-    // message rather than a generic render failure.
-    await mermaid.parse(code);
-    const id = `mermaid-view-${++renderCount}`;
-    const { svg } = await mermaid.render(id, code);
-    showDiagram(svg);
+    showDiagram(await drawMermaid(code));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    showError(message, code);
+    showError(errorText(err), code);
   }
+}
+
+function diagramFailure(message: string, code: string): HTMLElement {
+  const box = document.createElement("div");
+  box.className = "md-diagram-error";
+  box.append(`Diagram could not be rendered: ${message}`);
+  const source = document.createElement("pre");
+  source.textContent = code;
+  box.append(source);
+  return box;
+}
+
+/**
+ * Markdown is turned into HTML and sanitized — it is model output and may carry
+ * raw HTML — and each ```mermaid fence is then drawn in its placeholder. One bad
+ * diagram shows its own error in place and leaves the rest of the document alone.
+ */
+async function renderDocument(source: string) {
+  try {
+    const { html, diagrams } = renderMarkdown(source);
+    documentEl.innerHTML = DOMPurify.sanitize(html, { FORBID_TAGS: ["style", "form"], FORBID_ATTR: ["style"] });
+    showResult("document");
+
+    // Raw HTML in the document can carry the placeholder attribute too (sanitizing
+    // keeps data-* and class). That only redraws one of the document's own diagrams
+    // in the wrong spot, so there is nothing to defend; an out-of-range index is skipped.
+    for (const slot of documentEl.querySelectorAll<HTMLElement>(`[${DIAGRAM_INDEX_ATTR}]`)) {
+      const code = diagrams[Number(slot.getAttribute(DIAGRAM_INDEX_ATTR))];
+      if (code === undefined) continue;
+      try {
+        slot.innerHTML = await drawMermaid(code);
+      } catch (err) {
+        slot.replaceChildren(diagramFailure(errorText(err), code));
+      }
+    }
+  } catch (err) {
+    showError(errorText(err), source);
+  }
+}
+
+// The sandboxed frame can't navigate: open links through the host instead.
+documentEl.addEventListener("click", (e) => {
+  const link = (e.target as Element).closest("a[href]");
+  if (!link) return;
+  e.preventDefault();
+  const url = link.getAttribute("href") ?? "";
+  if (/^https?:\/\//i.test(url) && app.getHostCapabilities()?.openLinks) void app.openLink({ url });
+});
+
+async function renderContent(type: ContentType, source: string) {
+  lastSource = source;
+  lastType = type;
+  showStatus(type === "markdown" ? "Rendering document…" : "Rendering diagram…");
+  await (type === "markdown" ? renderDocument(source) : renderMermaid(source));
 }
 
 let lastAppliedTheme: string | undefined;
@@ -491,7 +565,7 @@ function handleHostContextChanged(ctx: McpUiHostContext) {
     lastAppliedTheme = ctx.theme;
     applyDocumentTheme(ctx.theme);
     initMermaid(ctx.theme);
-    if (lastCode) void renderMermaid(lastCode);
+    if (lastSource) void renderContent(lastType, lastSource);
   }
   if (ctx.styles?.variables) {
     applyHostStyleVariables(ctx.styles.variables);
@@ -509,20 +583,21 @@ initMermaid(prefersDark ? "dark" : "light");
 const initialCode = typeof window.__MERMAID_INITIAL_CODE__ === "string" ? window.__MERMAID_INITIAL_CODE__ : null;
 const initialId = typeof window.__MERMAID_INITIAL_ID__ === "string" ? window.__MERMAID_INITIAL_ID__ : null;
 const initialTitle = typeof window.__MERMAID_INITIAL_TITLE__ === "string" ? window.__MERMAID_INITIAL_TITLE__ : null;
+const initialType = parseContentType(window.__MERMAID_INITIAL_TYPE__);
 
 // Render immediately if the server baked the source into this document —
 // don't wait on ui/initialize or any notification for the common case.
 if (initialCode) {
   lastId = initialId;
   lastTitle = initialTitle;
-  void renderMermaid(initialCode);
+  void renderContent(initialType, initialCode);
 }
 
 const app = new App({ name: "Mermaid Viewer", version: "1.0.0" });
 
 // Register handlers before connect() so we don't miss the initial tool result.
 app.ontoolinput = () => {
-  if (!initialCode) showStatus("Rendering diagram…");
+  if (!initialCode) showStatus("Rendering…");
 };
 
 app.ontoolresult = (result) => {
@@ -538,7 +613,7 @@ app.ontoolresult = (result) => {
   lastId = payload?.id ?? initialId;
   lastTitle = payload?.title ?? initialTitle;
   if (code) {
-    void renderMermaid(code);
+    void renderContent(payload ? payload.type : initialType, code);
   } else {
     showError(
       "The host did not pass this diagram's source to the viewer, so there is nothing to draw. Ask Claude to render it again.",
@@ -558,5 +633,10 @@ app.connect().then(() => {
   if (ctx) handleHostContextChanged(ctx);
   // Hide rather than disable: a host that can't proxy tool calls back to
   // the server has no path to make this button ever work.
-  importBtn.hidden = !app.getHostCapabilities()?.serverTools;
+  importBtn.hidden = targetBtn.hidden = !app.getHostCapabilities()?.serverTools;
+});
+
+initTargetPanel(app, () => lastId, (target) => {
+  importTitle = `复制这张图到 Mermaid Local「${describeTarget(target)}」`;
+  importBtn.title = importTitle;
 });

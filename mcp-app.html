@@ -5,26 +5,43 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Mermaid Viewer</title>
+    <!--mermaid-initial-state-->
   </head>
   <body>
     <main id="app" class="mermaid-app" aria-live="polite">
       <div id="status" class="status">Waiting for diagram…</div>
 
       <div id="toolbar" class="toolbar" hidden>
-        <div class="toolbar-group">
+        <div id="zoom-group" class="toolbar-group">
           <button id="zoom-out" class="btn" type="button" aria-label="缩小">−</button>
           <span id="zoom-level" class="zoom-level">100%</span>
           <button id="zoom-in" class="btn" type="button" aria-label="放大">+</button>
           <button id="zoom-reset" class="btn" type="button">适应宽度</button>
         </div>
-        <div class="toolbar-group">
+        <div class="toolbar-group toolbar-actions">
           <button id="fullscreen-btn" class="btn" type="button" hidden>⤢ 全屏</button>
           <button id="copy-btn" class="btn" type="button">⧉ 复制源码</button>
-          <button id="import-btn" class="btn" type="button" hidden title="复制这张图到 Mermaid Local 笔记">→ Mermaid Local</button>
+          <div id="target-split" class="split">
+            <button id="import-btn" class="btn" type="button" hidden title="复制这张图到 Mermaid Local 笔记">→ Mermaid Local</button>
+            <button id="target-btn" class="btn btn-icon" type="button" hidden title="选择导入位置" aria-label="选择导入位置" aria-haspopup="true" aria-expanded="false" aria-controls="target-panel"><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <div id="target-panel" class="target-panel" role="dialog" aria-label="导入位置" hidden>
+              <label class="target-row">
+                <span class="target-label">项目</span>
+                <select id="target-project" class="target-select" disabled></select>
+              </label>
+              <label class="target-row">
+                <span class="target-label">文件夹</span>
+                <select id="target-folder" class="target-select" disabled></select>
+              </label>
+              <div id="target-status" class="target-status" role="status"></div>
+            </div>
+          </div>
         </div>
       </div>
 
       <div id="diagram-title" class="diagram-title" hidden></div>
+
+      <article id="document" class="document" hidden></article>
 
       <div id="viewport" class="viewport" hidden title="按住 ⌘/Ctrl 用滚轮缩放，拖动可平移">
         <div id="pan-zoom" class="pan-zoom"></div>

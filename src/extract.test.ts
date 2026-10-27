@@ -12,6 +12,7 @@ describe("extractPayload", () => {
   it("reads structuredContent from a live result", () => {
     expect(extractPayload({ content: [], structuredContent: { code: CODE, id: ID, title: TITLE } })).toEqual({
       code: CODE,
+      type: "mermaid",
       id: ID,
       title: TITLE,
     });
@@ -22,7 +23,7 @@ describe("extractPayload", () => {
       content: [{ type: "text", text: JSON.stringify({ code: "stale", id: "old" }) }],
       structuredContent: { code: CODE, id: ID },
     };
-    expect(extractPayload(result)).toEqual({ code: CODE, id: ID, title: null });
+    expect(extractPayload(result)).toEqual({ code: CODE, type: "mermaid", id: ID, title: null });
   });
 
   it("recovers source, id and title from the JSON text a replaying host hands back (Code tab)", () => {
@@ -30,6 +31,7 @@ describe("extractPayload", () => {
       code: CODE,
       id: ID,
       title: TITLE,
+      type: "mermaid",
     });
   });
 
@@ -40,7 +42,7 @@ describe("extractPayload", () => {
   });
 
   it("recovers older results that were saved before ids existed", () => {
-    expect(extractPayload(text(JSON.stringify({ code: CODE })))).toEqual({ code: CODE, id: null, title: null });
+    expect(extractPayload(text(JSON.stringify({ code: CODE })))).toEqual({ code: CODE, type: "mermaid", id: null, title: null });
   });
 
   it("skips non-JSON and non-text blocks until it finds the payload", () => {
@@ -51,15 +53,32 @@ describe("extractPayload", () => {
         { type: "text", text: JSON.stringify({ code: CODE, id: ID }) },
       ],
     };
-    expect(extractPayload(result)).toEqual({ code: CODE, id: ID, title: null });
+    expect(extractPayload(result)).toEqual({ code: CODE, type: "mermaid", id: ID, title: null });
   });
 
   it("falls back to a mermaid fence in plain text, without an id", () => {
     expect(extractPayload(text("Rendered a Mermaid diagram.\n```mermaid\n" + CODE + "\n```"))).toEqual({
       code: CODE,
+      type: "mermaid",
       id: null,
       title: null,
     });
+  });
+
+  it("reads the content type from a live result and from replayed JSON text", () => {
+    const doc = "# 说明\n\n```mermaid\nflowchart LR\nA-->B\n```";
+    expect(extractPayload({ content: [], structuredContent: { code: doc, id: ID, title: TITLE, type: "markdown" } })).toEqual({
+      code: doc,
+      type: "markdown",
+      id: ID,
+      title: TITLE,
+    });
+    expect(extractPayload(text(JSON.stringify({ code: doc, id: ID, title: TITLE, type: "markdown" })))?.type).toBe("markdown");
+  });
+
+  it("treats a missing or unknown type as mermaid, so results saved before types existed still draw", () => {
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID })))?.type).toBe("mermaid");
+    expect(extractPayload(text(JSON.stringify({ code: CODE, id: ID, type: "html" })))?.type).toBe("mermaid");
   });
 
   it("returns null when no source arrived", () => {
