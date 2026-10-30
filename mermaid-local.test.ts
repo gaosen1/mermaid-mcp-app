@@ -1,7 +1,17 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deleteAgentNote, importDiagram, listAgentNotes, listTargets, MermaidLocalError } from "./mermaid-local";
+import {
+  deleteAgentNote,
+  importDiagram,
+  listAgentNotes,
+  listTargets,
+  MermaidLocalError,
+  readNote,
+  resolveNote,
+  updateNote,
+  waitForCommand,
+} from "./mermaid-local";
 
 let server: http.Server;
 let base: string;
@@ -14,6 +24,12 @@ let agentNotes: unknown;
 let deleteResult: { status: number; body: unknown };
 let deletes: string[];
 let noteQueries: string[];
+let resolveResult: { status: number; body: unknown };
+let noteSource: { status: number; text: string };
+let updateResult: { status: number; body: unknown };
+let updates: Array<{ path: string; body: unknown }>;
+let commandStatuses: unknown[];
+let resolveRefs: string[];
 
 beforeEach(async () => {
   manifest = { projects: [{ name: "LLM", folders: ["多模态", "多模态/对比学习"] }] };
@@ -25,6 +41,15 @@ beforeEach(async () => {
   deleteResult = { status: 202, body: { ok: true } };
   deletes = [];
   noteQueries = [];
+  resolveResult = {
+    status: 200,
+    body: { id: "note-1", name: "排序算法", type: "html", projectName: "LLM", folderPath: null, hash: "h1", status: "present" },
+  };
+  noteSource = { status: 200, text: "<p>source</p>" };
+  updateResult = { status: 202, body: { ok: true, id: "note-1", commandId: "cmd-1", notified: 1 } };
+  updates = [];
+  commandStatuses = [{ status: "pending" }, { status: "applied", message: "已更新" }];
+  resolveRefs = [];
   server = http.createServer((req, res) => {
     const send = (code: number, payload: unknown) => {
       res.writeHead(code, { "Content-Type": "application/json" });
@@ -39,6 +64,26 @@ beforeEach(async () => {
       req.on("end", () => {
         posts.push({ auth: req.headers.authorization, body: JSON.parse(raw) });
         send(postStatus, postStatus === 202 ? postBody : { error: "folderPath 必须是字符串" });
+      });
+      return;
+    }
+    if (req.url?.startsWith("/api/notes/resolve")) {
+      resolveRefs.push(new URL(req.url, "http://x").searchParams.get("ref") ?? "");
+      return send(resolveResult.status, resolveResult.body);
+    }
+    if (req.url?.endsWith("/assets/source")) {
+      res.writeHead(noteSource.status, { "Content-Type": "text/plain; charset=utf-8" });
+      return res.end(noteSource.status === 200 ? noteSource.text : JSON.stringify({ error: "没有 source 产物" }));
+    }
+    if (req.url?.startsWith("/api/commands/")) {
+      return send(200, commandStatuses.length > 1 ? commandStatuses.shift() : commandStatuses[0]);
+    }
+    if (req.method === "PUT" && req.url?.startsWith("/api/diagrams/")) {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        updates.push({ path: decodeURIComponent(req.url!.slice("/api/diagrams/".length)), body: JSON.parse(raw) });
+        send(updateResult.status, updateResult.body);
       });
       return;
     }
@@ -171,5 +216,85 @@ describe("deleteAgentNote", () => {
   it("surfaces the refusal for a note it did not write", async () => {
     deleteResult = { status: 403, body: { error: "只能删除经 Agent 写回的笔记" } };
     await expect(deleteAgentNote(base, "n1")).rejects.toThrow("只能删除经 Agent 写回的笔记");
+  });
+});
+
+describe("resolveNote", () => {
+  it("asks the service to resolve an id or a URL and returns the note", async () => {
+    const note = await resolveNote(base, "http://localhost:5173/project/4fdbf199/diagram/c2cdb76b");
+    expect(resolveRefs).toEqual(["http://localhost:5173/project/4fdbf199/diagram/c2cdb76b"]);
+    expect(note).toMatchObject({ id: "note-1", name: "排序算法", hash: "h1", status: "present" });
+  });
+
+  it("surfaces an ambiguous or unknown reference as the service words it", async () => {
+    resolveResult = { status: 409, body: { error: "986165f7 对应多条笔记" } };
+    await expect(resolveNote(base, "986165f7")).rejects.toThrow("对应多条笔记");
+  });
+
+  it("complains about a note description it cannot read (older service)", async () => {
+    resolveResult = { status: 200, body: { id: "note-1" } };
+    await expect(resolveNote(base, "x")).rejects.toBeInstanceOf(MermaidLocalError);
+  });
+});
+
+describe("readNote", () => {
+  it("returns the source with the note's fingerprint", async () => {
+    expect(await readNote(base, "note-1")).toEqual({ note: expect.objectContaining({ id: "note-1", hash: "h1" }), source: "<p>source</p>" });
+  });
+
+  it("explains that a note still waiting in the inbox cannot be read yet", async () => {
+    resolveResult = { status: 200, body: { ...(resolveResult.body as object), status: "pending", hash: null } };
+    await expect(readNote(base, "note-1")).rejects.toThrow(/还在等 Mermaid Local 导入/);
+  });
+
+  it("surfaces a missing source", async () => {
+    noteSource = { status: 404, text: "" };
+    await expect(readNote(base, "note-1")).rejects.toThrow("没有 source 产物");
+  });
+});
+
+describe("updateNote", () => {
+  it("puts the new content (with name and base hash) and reports that a page will act on it", async () => {
+    const queued = await updateNote(base, "note-1", { source: "<p>new</p>", name: "新标题", baseHash: "h1" });
+    expect(updates).toEqual([{ path: "note-1", body: { source: "<p>new</p>", name: "新标题", baseHash: "h1" } }]);
+    expect(queued).toEqual({ id: "note-1", commandId: "cmd-1", pageOpen: true });
+  });
+
+  it("sends a URL as the reference untouched", async () => {
+    await updateNote(base, "http://localhost:5173/project/a/diagram/b", { source: "x" });
+    expect(updates[0].path).toBe("http://localhost:5173/project/a/diagram/b");
+  });
+
+  it("reports a note that was still queued (no command) and a page that is not open", async () => {
+    updateResult = { status: 200, body: { ok: true, id: "note-1", status: "applied" } };
+    expect(await updateNote(base, "note-1", { source: "x" })).toEqual({ id: "note-1", commandId: undefined, pageOpen: false });
+    updateResult = { status: 202, body: { ok: true, id: "note-1", commandId: "cmd-2", notified: 0 } };
+    expect((await updateNote(base, "note-1", { source: "x" })).pageOpen).toBe(false);
+  });
+
+  it("surfaces a refusal, and a response without an id (older service)", async () => {
+    updateResult = { status: 400, body: { error: "png 图片笔记没有文本源码，改不了" } };
+    await expect(updateNote(base, "note-1", { source: "x" })).rejects.toThrow("图片笔记");
+    updateResult = { status: 202, body: { ok: true } };
+    await expect(updateNote(base, "note-1", { source: "x" })).rejects.toThrow(/旧版本/);
+  });
+});
+
+describe("waitForCommand", () => {
+  it("polls until the page answers", async () => {
+    expect(await waitForCommand(base, "cmd-1", { timeoutMs: 2000, intervalMs: 5 })).toEqual({ status: "applied", message: "已更新" });
+  });
+
+  it("passes a refusal through", async () => {
+    commandStatuses = [{ status: "conflict", message: "笔记在你读取之后被改过" }];
+    expect(await waitForCommand(base, "cmd-1", { timeoutMs: 2000, intervalMs: 5 })).toEqual({
+      status: "conflict",
+      message: "笔记在你读取之后被改过",
+    });
+  });
+
+  it("gives up with null when the page never answers", async () => {
+    commandStatuses = [{ status: "pending" }];
+    expect(await waitForCommand(base, "cmd-1", { timeoutMs: 60, intervalMs: 10 })).toBeNull();
   });
 });

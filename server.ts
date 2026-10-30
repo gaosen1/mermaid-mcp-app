@@ -22,9 +22,21 @@ import {
   withImportTarget,
   workspaceLabel,
 } from "./config.js";
-import { deleteAgentNote, importDiagram, listAgentNotes, listTargets, MermaidLocalError, type AgentNote } from "./mermaid-local.js";
+import {
+  deleteAgentNote,
+  importDiagram,
+  listAgentNotes,
+  listTargets,
+  MermaidLocalError,
+  readNote,
+  resolveNote,
+  updateNote,
+  waitForCommand,
+  type AgentNote,
+  type NoteUpdate,
+} from "./mermaid-local.js";
 import { bakeInitialState } from "./bake.js";
-import { HtmlNoteError, readHtmlNote, type HtmlNoteSource } from "./html-note.js";
+import { NoteSourceError, readNoteSource, type NoteSource } from "./note-source.js";
 import { createRenderStore } from "./renders.js";
 import { CONTENT_TYPES } from "./src/content-type.js";
 import { describeTarget, normalizeFolderPath, type ImportTarget, type TargetProject } from "./src/targets.js";
@@ -84,7 +96,7 @@ interface SaveOutcome extends ToolOutcome {
 const failure = (err: unknown): ToolOutcome => ({
   ok: false,
   message:
-    err instanceof MermaidLocalError || err instanceof HtmlNoteError
+    err instanceof MermaidLocalError || err instanceof NoteSourceError
       ? err.message
       : `Mermaid Local 请求失败：${err instanceof Error ? err.message : String(err)}`,
 });
@@ -120,29 +132,102 @@ async function importRenderToMermaidLocal(id: string): Promise<ToolOutcome> {
 }
 
 /**
+ * Carries out an edit of an existing note and reports what really happened. The Mermaid Local page does the
+ * work, so when one is open we wait for its answer: otherwise a refused edit (the note changed since it was
+ * read) would be reported to the model as a success.
+ */
+async function applyNoteUpdate(ref: string, update: NoteUpdate, label: string): Promise<ToolOutcome> {
+  const { agentApiBaseUrl } = loadConfig();
+  const queued = await updateNote(agentApiBaseUrl, ref, update);
+  if (queued.commandId === undefined) {
+    return { ok: true, message: `「${label}」还在 Mermaid Local 的待导入队列里，已直接改写待导入的内容。` };
+  }
+  if (!queued.pageOpen) {
+    return {
+      ok: true,
+      message: `已请求修改「${label}」：Mermaid Local 页面没开，下次打开时执行；执行前会先把旧版本存进该笔记的「历史」。`,
+    };
+  }
+  const outcome = await waitForCommand(agentApiBaseUrl, queued.commandId);
+  if (outcome === null) {
+    return { ok: true, message: `已请求修改「${label}」，但还没等到 Mermaid Local 页面确认；稍后在页面里看结果，或再读一次这条笔记核对。` };
+  }
+  return { ok: outcome.status === "applied", message: `「${label}」：${outcome.message}` };
+}
+
+/**
  * Imports an HTML page straight into Mermaid Local, at the import target of
  * the workspace it came from. No render and no button: the model only calls
- * this when the user has already said "keep this one".
+ * this when the user has already said "keep this one". With `replaces`, the
+ * page goes into that existing note instead (same id and URL, old version kept in its history).
  */
 async function saveHtmlNote(
   title: string,
   workspace: string,
-  source: HtmlNoteSource,
+  source: NoteSource,
+  replaces: string | undefined,
 ): Promise<SaveOutcome> {
   const config = loadConfig();
-  const target = resolveImportTarget(config, normalizeWorkspace(workspace));
-  let id: string;
   try {
-    const html = await readHtmlNote(source);
-    ({ id } = await importDiagram(config.agentApiBaseUrl, { name: title, type: "html", source: html, target }));
+    const html = await readNoteSource(source, { textParam: "html", htmlFile: true });
+    if (replaces !== undefined) {
+      const note = await resolveNote(config.agentApiBaseUrl, replaces);
+      if (note.type !== "html") {
+        return { ok: false, message: `「${note.name}」是 ${note.type} 笔记，不能用 HTML 页面替换它（笔记类型改不了）。` };
+      }
+      return { ...(await applyNoteUpdate(note.id, { source: html, name: title }, note.name)), id: note.id };
+    }
+    const target = resolveImportTarget(config, normalizeWorkspace(workspace));
+    const { id } = await importDiagram(config.agentApiBaseUrl, { name: title, type: "html", source: html, target });
+    return {
+      ok: true,
+      id,
+      message: `已把「${title}」投递到 Mermaid Local 的「${describeTarget(target)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。笔记 id：${id}（之后要替换或撤回这一版，把它交给 save_html_note 的 replaces，或 delete_agent_note）。`,
+    };
   } catch (err) {
     return failure(err);
   }
-  return {
-    ok: true,
-    id,
-    message: `已把「${title}」投递到 Mermaid Local 的「${describeTarget(target)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。笔记 id：${id}（之后要撤回或替换这一版，把它交给 delete_agent_note）。`,
-  };
+}
+
+interface ReadNoteOutcome extends ToolOutcome {
+  id?: string;
+  name?: string;
+  type?: string;
+  baseHash?: string;
+  source?: string;
+}
+
+/** Hands the model a note's current source, plus the fingerprint an edit has to be based on. */
+async function readNoteForModel(ref: string, saveTo: string | undefined): Promise<ReadNoteOutcome> {
+  try {
+    const { note, source } = await readNote(loadConfig().agentApiBaseUrl, ref);
+    const meta = { id: note.id, name: note.name, type: note.type, baseHash: note.hash ?? undefined };
+    const header = `「${note.name}」（${note.type}，${note.projectName ?? "默认项目"}${note.folderPath ? ` / ${note.folderPath}` : ""}）\nid: ${note.id}\nbaseHash: ${note.hash}（改它时把这个值传给 update_note 的 baseHash，笔记之后被改过就不会被覆盖）`;
+    if (saveTo !== undefined) {
+      if (!path.isAbsolute(saveTo)) return { ok: false, message: `saveTo 必须是绝对路径：${saveTo}` };
+      await fs.writeFile(saveTo, source, "utf-8");
+      return { ok: true, ...meta, message: `${header}\n内容（${Buffer.byteLength(source, "utf-8")} 字节）已写入 ${saveTo}` };
+    }
+    return { ok: true, ...meta, source, message: `${header}\n\n${source}` };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+/** Replaces a note's content (and optionally its title) in place. */
+async function updateNoteForModel(
+  ref: string,
+  source: NoteSource,
+  title: string | undefined,
+  baseHash: string | undefined,
+): Promise<ToolOutcome> {
+  try {
+    const note = await resolveNote(loadConfig().agentApiBaseUrl, ref);
+    const content = await readNoteSource(source, { textParam: "content", htmlFile: note.type === "html" });
+    return await applyNoteUpdate(note.id, { source: content, name: title, baseHash }, note.name);
+  } catch (err) {
+    return failure(err);
+  }
 }
 
 /** Lists the notes this server saved into Mermaid Local, so one of them can be picked for deletion. */
@@ -269,7 +354,21 @@ Input contract:
 
 The result says where the note was filed, or why it couldn't be, and gives the note's id; relay the location to the user and keep the id.
 
-Saving the same page twice makes two notes. If you saved a page that turns out to be wrong and are about to save a corrected one, delete the wrong one with delete_agent_note (using the id from this result) instead of leaving both.`;
+Saving the same page twice makes two notes. When you are saving a corrected version of a page that is already in Mermaid Local (one you saved earlier — use the id from that result — or one the user points you at by its URL), pass \`replaces\`: the page goes into that note in place, so its id, URL, folder and tags stay, and the old version is kept in the note's history. \`replaces\` needs an HTML note, and \`title\` becomes its new name. Do not save a new copy and then delete the old one.`;
+
+const READ_NOTE_DESCRIPTION = `Read a note from the user's Mermaid Local — any note, not only ones you saved — by its id or by its URL (the address bar of the Mermaid Local page, e.g. http://localhost:5173/project/4fdbf199/diagram/c2cdb76b). Returns the note's source and a \`baseHash\`.
+
+Use it before editing a note with update_note: you cannot edit what you have not read. Pass the \`baseHash\` back to update_note so the edit is refused if the user changed the note in the meantime.
+
+Large notes (HTML pages are often tens of KB): pass \`saveTo\` (an absolute path) to write the source to a file instead of returning it, then read or edit that file with your normal file tools — this keeps the page out of your context until you need parts of it. The content is as of Mermaid Local's last sync (a couple of seconds behind the page).`;
+
+const UPDATE_NOTE_DESCRIPTION = `Replace the content of an existing Mermaid Local note in place — any note the user has, identified by its id or its URL (see read_note). The note keeps its id, URL, folder and tags. Mermaid Local saves the previous version to the note's history first, so the user can roll back with one click.
+
+When to call this: the user asks you to change, fix or update a specific note ("fix the merge sort code in this note" + its URL), or you are correcting a note you saved earlier. Read it first with read_note and pass its \`baseHash\`: if the user edited the note after you read it, nothing is overwritten and you are told so — read it again and redo the edit. Without \`baseHash\` the content is overwritten unconditionally.
+
+Send the note's COMPLETE new content, not a patch. Pass it as \`path\` (an absolute path to a local file — preferred, costs no tokens) or \`content\` (inline). For an HTML note use a .html file or inline HTML. The note's type cannot change, and image notes cannot be edited. \`title\` renames it.
+
+The edit is carried out by the open Mermaid Local page; the result says whether it was applied, refused (the note changed since you read it) or is waiting for the page to be opened.`;
 
 const LIST_AGENT_NOTES_DESCRIPTION = `List the notes that were saved into the user's Mermaid Local through this server (save_html_note, or the viewer's "→ Mermaid Local" button), newest first, with their ids. Notes the user wrote themselves are never listed.
 
@@ -278,9 +377,9 @@ Call it only to find the id of a note you need to delete — for example you sav
 const DELETE_AGENT_NOTE_DESCRIPTION = `Delete one note that was saved into Mermaid Local through this server, by the id save_html_note (or list_agent_notes) gave you.
 
 When to call this:
-- You saved an HTML page that has an error and you are saving the corrected version: delete the wrong one so the user is not left with duplicates.
 - The user asks you to remove a note you saved.
-Never delete a note just to tidy up, and never delete one the user did not ask about or that you did not save in order to replace it. This cannot be undone from here (the user can restore it only if cloud sync still has it).
+- You saved a page by mistake (wrong page, test) and it should not exist at all.
+To fix or update a note, do NOT delete it and save a new one: use save_html_note with \`replaces\` or update_note, which keep the note's id and URL. Never delete a note just to tidy up, and never delete one the user did not ask about. This cannot be undone from here (the user can restore it only if cloud sync still has it).
 
 It only works on notes saved through this server; Mermaid Local refuses the user's own notes. The delete is carried out by the Mermaid Local page: immediately if it is open, otherwise the next time it is opened. If the note was still waiting to be imported, it is cancelled and never appears.`;
 
@@ -383,11 +482,64 @@ export function createServer(): McpServer {
           .describe("Absolute path of this session's primary working directory, e.g. '/Users/me/projects/app'"),
         path: z.string().optional().describe("Absolute path of a local .html file holding the page. Pass this or `html`, not both."),
         html: z.string().optional().describe("The page's complete HTML document, verbatim. Pass this or `path`, not both."),
+        replaces: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe("Id or Mermaid Local URL of an existing HTML note to replace in place instead of creating a new note"),
       }),
       outputSchema: z.object({ ok: z.boolean(), message: z.string(), id: z.string().optional() }),
     },
-    async ({ title, workspace, path: file, html }): Promise<CallToolResult> => {
-      const result = await saveHtmlNote(title, workspace, { path: file, html });
+    async ({ title, workspace, path: file, html, replaces }): Promise<CallToolResult> => {
+      const result = await saveHtmlNote(title, workspace, { path: file, text: html }, replaces);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  server.registerTool(
+    "read_note",
+    {
+      title: "Read a note from Mermaid Local",
+      description: READ_NOTE_DESCRIPTION,
+      inputSchema: z.object({
+        note: z.string().trim().min(1, "note must be a note id or its Mermaid Local URL").describe("The note's id, or its URL in Mermaid Local"),
+        saveTo: z.string().optional().describe("Absolute path to write the source to instead of returning it"),
+      }),
+      outputSchema: z.object({
+        ok: z.boolean(),
+        message: z.string(),
+        id: z.string().optional(),
+        name: z.string().optional(),
+        type: z.string().optional(),
+        baseHash: z.string().optional(),
+        source: z.string().optional(),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ note, saveTo }): Promise<CallToolResult> => {
+      const result = await readNoteForModel(note, saveTo);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  server.registerTool(
+    "update_note",
+    {
+      title: "Update a note in Mermaid Local",
+      description: UPDATE_NOTE_DESCRIPTION,
+      inputSchema: z.object({
+        note: z.string().trim().min(1, "note must be a note id or its Mermaid Local URL").describe("The note's id, or its URL in Mermaid Local"),
+        baseHash: z.string().optional().describe("The baseHash read_note returned for the version you edited; the edit is refused if the note changed since"),
+        title: z.string().trim().min(1).optional().describe("New name for the note; omit to keep it"),
+        path: z.string().optional().describe("Absolute path of a local file holding the note's complete new content. Pass this or `content`, not both."),
+        content: z.string().optional().describe("The note's complete new content, inline. Pass this or `path`, not both."),
+      }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ note, baseHash, title, path: file, content }): Promise<CallToolResult> => {
+      const result = await updateNoteForModel(note, { path: file, text: content }, title, baseHash);
       return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
     },
   );

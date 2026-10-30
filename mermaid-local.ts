@@ -145,3 +145,107 @@ export async function deleteAgentNote(base: string, id: string): Promise<"cancel
   if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "删除失败"));
   return res.status === 200 ? "cancelled" : "queued";
 }
+
+/** A note as agent-api describes it. `hash` is the fingerprint of its source: what an edit must be based on. */
+export interface NoteRef {
+  id: string;
+  name: string;
+  type: string;
+  projectName: string | null;
+  folderPath: string | null;
+  hash: string | null;
+  /** `pending`: still queued in Mermaid Local's inbox and not readable yet. */
+  status: "pending" | "present";
+}
+
+const noteRefSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(),
+  projectName: z.string().nullable(),
+  folderPath: z.string().nullable(),
+  hash: z.string().nullable(),
+  status: z.enum(["pending", "present"]),
+});
+
+/** Finds one note from its id (or a prefix of it) or from its URL in Mermaid Local; refuses to guess between several. */
+export async function resolveNote(base: string, ref: string): Promise<NoteRef> {
+  const res = await request(base, `/api/notes/resolve?ref=${encodeURIComponent(ref)}`, { headers: await authHeader(base) });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "找不到这条笔记"));
+  const parsed = noteRefSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) throw new MermaidLocalError(`同步服务返回的笔记信息格式不对（它可能是旧版本）。${SETUP_HINT}`);
+  return parsed.data;
+}
+
+/** The note's current source as of Mermaid Local's last sync, with the fingerprint to pass back when editing it. */
+export async function readNote(base: string, ref: string): Promise<{ note: NoteRef; source: string }> {
+  const note = await resolveNote(base, ref);
+  if (note.status === "pending") {
+    throw new MermaidLocalError(`「${note.name}」还在等 Mermaid Local 导入，现在读不到；打开 Mermaid Local 页面后再试。`);
+  }
+  const res = await request(base, `/api/diagrams/${encodeURIComponent(note.id)}/assets/source`, { headers: await authHeader(base) });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, `读取「${note.name}」的内容失败`));
+  return { note, source: await res.text() };
+}
+
+export interface NoteUpdate {
+  source: string;
+  name?: string;
+  /** The `hash` of the version the new content was written from; the edit is refused if the note has changed since. */
+  baseHash?: string;
+}
+
+export interface QueuedUpdate {
+  id: string;
+  /** Set when the page has to carry the edit out; absent when the note was still queued and was simply rewritten. */
+  commandId?: string;
+  /** Whether a Mermaid Local page is connected and will act on it right away. */
+  pageOpen: boolean;
+}
+
+/** Asks Mermaid Local to replace a note's content in place. The page does the work; see `waitForCommand`. */
+export async function updateNote(base: string, ref: string, update: NoteUpdate): Promise<QueuedUpdate> {
+  const res = await request(base, `/api/diagrams/${encodeURIComponent(ref)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...(await authHeader(base)) },
+    body: JSON.stringify(update),
+  });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "修改失败"));
+  const body = (await res.json().catch(() => ({}))) as { id?: unknown; commandId?: unknown; notified?: unknown };
+  if (typeof body.id !== "string") throw new MermaidLocalError(`同步服务的响应里没有笔记 id（它可能是旧版本）。${SETUP_HINT}`);
+  return {
+    id: body.id,
+    commandId: typeof body.commandId === "string" ? body.commandId : undefined,
+    pageOpen: typeof body.notified === "number" && body.notified > 0,
+  };
+}
+
+export interface CommandOutcome {
+  status: "applied" | "conflict" | "missing" | "unsupported";
+  message: string;
+}
+
+const commandOutcomeSchema = z.object({
+  status: z.enum(["pending", "applied", "conflict", "missing", "unsupported"]),
+  message: z.string().optional(),
+});
+
+/** Polls until the page has answered an update command; `null` if it has not within the time given. */
+export async function waitForCommand(
+  base: string,
+  commandId: string,
+  { timeoutMs = 8000, intervalMs = 250 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<CommandOutcome | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await request(base, `/api/commands/${encodeURIComponent(commandId)}`, { headers: await authHeader(base) });
+    if (res.ok) {
+      const parsed = commandOutcomeSchema.safeParse(await res.json().catch(() => null));
+      if (parsed.success && parsed.data.status !== "pending") {
+        return { status: parsed.data.status, message: parsed.data.message ?? "" };
+      }
+    }
+    if (Date.now() + intervalMs >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}

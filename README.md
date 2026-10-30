@@ -31,11 +31,11 @@ Enable once: **Claude menu → Help → Troubleshooting → Enable Developer Mod
 
 | File | Role |
 |---|---|
-| `server.ts` | MCP server: registers `render_mermaid` (+ its `ui://mermaid/viewer-*` UI resource), `save_html_note`, `list_agent_notes` / `delete_agent_note`, and the app-only import / target-picker tools |
+| `server.ts` | MCP server: registers `render_mermaid` (+ its `ui://mermaid/viewer-*` UI resource), `save_html_note`, `read_note` / `update_note`, `list_agent_notes` / `delete_agent_note`, and the app-only import / target-picker tools |
 | `renders.ts` | On-disk store for each render (`<id>.mmd` / `<id>.md` + `<id>.json` sidecar) |
 | `bake.ts` | Injects a render's state into the viewer HTML for the per-call page |
-| `mermaid-local.ts` | Client for Mermaid Local's `agent-api` (list projects/folders, import a diagram, list / delete the notes it saved) |
-| `html-note.ts` | Reads the page for `save_html_note` from inline `html` or a local `path`, with size/shape checks |
+| `mermaid-local.ts` | Client for Mermaid Local's `agent-api` (list projects/folders, import a diagram, resolve / read / update any note, list / delete the notes it saved) |
+| `note-source.ts` | Reads note content for `save_html_note` / `update_note` from inline text or a local `path`, with size/shape checks |
 | `config.ts` / `configure.mjs` | Persisted import target + agent-api URL, and the CLI that edits them |
 | `main.ts` | Process entry point — stdio transport by default (what Claude Desktop uses), `--http` for local testing |
 | `mcp-app.html` | View shell (the UI resource's HTML) |
@@ -110,17 +110,30 @@ The page arrives one of two ways (exactly one per call):
 Pages are capped at 4 MB (agent-api's body limit is 5 MB). Pages that load libraries from a CDN still need network
 access when opened in Mermaid Local. Requires a Mermaid Local whose inbox accepts `html` notes.
 
-### Replacing or removing a saved page
+### Editing, replacing and removing notes
 
-Saving the same page twice makes two notes, so when a saved page turns out to be wrong, saving the corrected one would
-leave duplicates. `save_html_note` therefore returns the note's id, and `delete_agent_note` removes a note by that id
-(`list_agent_notes` finds it again, newest first, filterable by title, if the id is no longer in the conversation).
+Saving the same page twice makes two notes, and a "fix" that deletes the note and saves a new one throws away its id,
+URL, history and place in the folder tree. So notes can be changed in place:
 
-Deletion is scoped on purpose: Mermaid Local's `agent-api` keeps a ledger (`agent-notes.json` in the sync folder) of
-the notes written through it, and refuses any id that is not in it, so the model can only remove notes it saved
-itself, never ones you wrote. The delete is carried out by the Mermaid Local page — immediately if it is open,
-otherwise the next time you open it — and a note that was still waiting to be imported is simply cancelled.
-Requires an `agent-api` that returns note ids; restart `pnpm dev` / `pnpm preview` in Mermaid Local after updating it.
+- `save_html_note` with `replaces` (a note id, or its Mermaid Local URL) puts the page into that existing HTML note
+  instead of creating one — the shortest path when Claude regenerates a page it saved earlier.
+- `read_note` returns any note's source (by id or URL; `saveTo` writes it to a file instead of into the conversation)
+  together with a `baseHash`, the fingerprint of that version.
+- `update_note` replaces a note's complete content (inline or from a file) and optionally renames it. With the
+  `baseHash` from `read_note` it is refused if the note changed after it was read, and the model is told so — it must
+  read again and redo the edit rather than overwrite what you typed meanwhile. Works on **any** note, not only ones the
+  model saved. Mermaid Local keeps the previous version in the note's history, so one click rolls an edit back.
+
+The edit is carried out by the open Mermaid Local page, and the tool waits for its answer (a few seconds), so an
+applied / refused result is real rather than assumed. If no page is open, the edit waits for the next time one is.
+
+`list_agent_notes` and `delete_agent_note` remain for finding and removing notes. Deletion is scoped on purpose:
+Mermaid Local's `agent-api` keeps a ledger (`agent-notes.json` in the sync folder) of the notes written through it and
+refuses any other id, so the model can only delete notes it saved itself, never ones you wrote. A note that was still
+waiting to be imported is simply cancelled.
+
+Requires an `agent-api` that returns note ids and supports `PUT` / `resolve`; restart `pnpm dev` / `pnpm preview` in
+Mermaid Local after updating it.
 
 ## Making changes
 
