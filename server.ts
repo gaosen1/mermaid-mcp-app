@@ -22,7 +22,7 @@ import {
   withImportTarget,
   workspaceLabel,
 } from "./config.js";
-import { importDiagram, listTargets, MermaidLocalError } from "./mermaid-local.js";
+import { deleteAgentNote, importDiagram, listAgentNotes, listTargets, MermaidLocalError, type AgentNote } from "./mermaid-local.js";
 import { bakeInitialState } from "./bake.js";
 import { HtmlNoteError, readHtmlNote, type HtmlNoteSource } from "./html-note.js";
 import { createRenderStore } from "./renders.js";
@@ -76,6 +76,11 @@ interface ToolOutcome {
   message: string;
 }
 
+interface SaveOutcome extends ToolOutcome {
+  /** Mermaid Local's id for the saved note; what delete_agent_note takes. */
+  id?: string;
+}
+
 const failure = (err: unknown): ToolOutcome => ({
   ok: false,
   message:
@@ -123,19 +128,51 @@ async function saveHtmlNote(
   title: string,
   workspace: string,
   source: HtmlNoteSource,
-): Promise<ToolOutcome> {
+): Promise<SaveOutcome> {
   const config = loadConfig();
   const target = resolveImportTarget(config, normalizeWorkspace(workspace));
+  let id: string;
   try {
     const html = await readHtmlNote(source);
-    await importDiagram(config.agentApiBaseUrl, { name: title, type: "html", source: html, target });
+    ({ id } = await importDiagram(config.agentApiBaseUrl, { name: title, type: "html", source: html, target }));
   } catch (err) {
     return failure(err);
   }
   return {
     ok: true,
-    message: `已把「${title}」投递到 Mermaid Local 的「${describeTarget(target)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。`,
+    id,
+    message: `已把「${title}」投递到 Mermaid Local 的「${describeTarget(target)}」：Mermaid Local 页面开着时会立即导入，没开则在下次打开时导入。笔记 id：${id}（之后要撤回或替换这一版，把它交给 delete_agent_note）。`,
   };
+}
+
+/** Lists the notes this server saved into Mermaid Local, so one of them can be picked for deletion. */
+async function listSavedNotes(query: string | undefined, type: string | undefined): Promise<ToolOutcome & { notes: AgentNote[] }> {
+  try {
+    const notes = await listAgentNotes(loadConfig().agentApiBaseUrl, { query, type });
+    if (notes.length === 0) return { ok: true, notes, message: "没有符合条件的、由 Agent 保存的笔记。" };
+    const lines = notes.map(
+      (n) => `- ${n.id}  [${n.type}] ${n.name}  （${n.projectName ?? "默认项目"}${n.folderPath ? ` / ${n.folderPath}` : ""}，${n.status === "pending" ? "等待导入" : "已导入"}，${new Date(n.createdAt).toLocaleString("zh-CN", { hour12: false })}）`,
+    );
+    return { ok: true, notes, message: `由 Agent 保存的笔记（新的在前）：\n${lines.join("\n")}` };
+  } catch (err) {
+    return { ...failure(err), notes: [] };
+  }
+}
+
+/** Deletes one note this server saved earlier; Mermaid Local refuses ids it did not come from. */
+async function deleteSavedNote(id: string): Promise<ToolOutcome> {
+  try {
+    const outcome = await deleteAgentNote(loadConfig().agentApiBaseUrl, id);
+    return {
+      ok: true,
+      message:
+        outcome === "cancelled"
+          ? `笔记 ${id} 还在 Mermaid Local 的待导入队列里，已撤销，不会出现在笔记库。`
+          : `已请求删除笔记 ${id}：Mermaid Local 页面开着时会立即删除，没开则在下次打开时删除。`,
+    };
+  } catch (err) {
+    return failure(err);
+  }
 }
 
 interface ImportTargetsOutcome extends ToolOutcome {
@@ -230,7 +267,22 @@ Input contract:
 - \`title\` (required): short, specific name for the note (e.g. "两数之和 · 哈希表查找过程"). It becomes the note's name in Mermaid Local.
 - \`workspace\` (required): the absolute path of your session's primary working directory, exactly as your environment reports it — the same value you pass to render_mermaid. It picks where in Mermaid Local the note lands.
 
-The result says where the note was filed, or why it couldn't be; relay that to the user.`;
+The result says where the note was filed, or why it couldn't be, and gives the note's id; relay the location to the user and keep the id.
+
+Saving the same page twice makes two notes. If you saved a page that turns out to be wrong and are about to save a corrected one, delete the wrong one with delete_agent_note (using the id from this result) instead of leaving both.`;
+
+const LIST_AGENT_NOTES_DESCRIPTION = `List the notes that were saved into the user's Mermaid Local through this server (save_html_note, or the viewer's "→ Mermaid Local" button), newest first, with their ids. Notes the user wrote themselves are never listed.
+
+Call it only to find the id of a note you need to delete — for example you saved a page in an earlier turn or conversation and no longer have its id. Use \`query\` (title substring) to narrow it down.`;
+
+const DELETE_AGENT_NOTE_DESCRIPTION = `Delete one note that was saved into Mermaid Local through this server, by the id save_html_note (or list_agent_notes) gave you.
+
+When to call this:
+- You saved an HTML page that has an error and you are saving the corrected version: delete the wrong one so the user is not left with duplicates.
+- The user asks you to remove a note you saved.
+Never delete a note just to tidy up, and never delete one the user did not ask about or that you did not save in order to replace it. This cannot be undone from here (the user can restore it only if cloud sync still has it).
+
+It only works on notes saved through this server; Mermaid Local refuses the user's own notes. The delete is carried out by the Mermaid Local page: immediately if it is open, otherwise the next time it is opened. If the note was still waiting to be imported, it is cancelled and never appears.`;
 
 /**
  * Creates a new MCP server instance with the render_mermaid tool and its UI resource registered.
@@ -332,11 +384,60 @@ export function createServer(): McpServer {
         path: z.string().optional().describe("Absolute path of a local .html file holding the page. Pass this or `html`, not both."),
         html: z.string().optional().describe("The page's complete HTML document, verbatim. Pass this or `path`, not both."),
       }),
-      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string(), id: z.string().optional() }),
     },
     async ({ title, workspace, path: file, html }): Promise<CallToolResult> => {
       const result = await saveHtmlNote(title, workspace, { path: file, html });
-      return { content: [{ type: "text", text: result.message }], structuredContent: result, isError: !result.ok };
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  server.registerTool(
+    "list_agent_notes",
+    {
+      title: "List notes saved to Mermaid Local",
+      description: LIST_AGENT_NOTES_DESCRIPTION,
+      inputSchema: z.object({
+        query: z.string().trim().optional().describe("Only notes whose title contains this text (case-insensitive)"),
+        type: z.enum(["mermaid", "markdown", "html", "txt"]).optional().describe("Only notes of this type"),
+      }),
+      outputSchema: z.object({
+        ok: z.boolean(),
+        message: z.string(),
+        notes: z.array(
+          z.object({
+            id: z.string(),
+            name: z.string(),
+            type: z.string(),
+            projectName: z.string().nullable(),
+            folderPath: z.string().nullable(),
+            createdAt: z.number(),
+            status: z.enum(["pending", "present"]),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query, type }): Promise<CallToolResult> => {
+      const result = await listSavedNotes(query || undefined, type);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  server.registerTool(
+    "delete_agent_note",
+    {
+      title: "Delete a note saved to Mermaid Local",
+      description: DELETE_AGENT_NOTE_DESCRIPTION,
+      inputSchema: z.object({
+        id: z.string().trim().min(1, "id must be the note id from save_html_note or list_agent_notes").describe("The note's id"),
+      }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ id }): Promise<CallToolResult> => {
+      const result = await deleteSavedNote(id);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
     },
   );
 

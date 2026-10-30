@@ -1,7 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { importDiagram, listTargets, MermaidLocalError } from "./mermaid-local";
+import { deleteAgentNote, importDiagram, listAgentNotes, listTargets, MermaidLocalError } from "./mermaid-local";
 
 let server: http.Server;
 let base: string;
@@ -9,12 +9,22 @@ let manifest: unknown;
 let manifestStatus: number;
 let posts: Array<{ auth: string | undefined; body: unknown }>;
 let postStatus: number;
+let postBody: unknown;
+let agentNotes: unknown;
+let deleteResult: { status: number; body: unknown };
+let deletes: string[];
+let noteQueries: string[];
 
 beforeEach(async () => {
   manifest = { projects: [{ name: "LLM", folders: ["多模态", "多模态/对比学习"] }] };
   manifestStatus = 200;
   posts = [];
   postStatus = 202;
+  postBody = { ok: true, id: "note-1" };
+  agentNotes = { count: 0, notes: [] };
+  deleteResult = { status: 202, body: { ok: true } };
+  deletes = [];
+  noteQueries = [];
   server = http.createServer((req, res) => {
     const send = (code: number, payload: unknown) => {
       res.writeHead(code, { "Content-Type": "application/json" });
@@ -28,9 +38,17 @@ beforeEach(async () => {
       req.on("data", (c) => (raw += c));
       req.on("end", () => {
         posts.push({ auth: req.headers.authorization, body: JSON.parse(raw) });
-        send(postStatus, postStatus === 202 ? { ok: true } : { error: "folderPath 必须是字符串" });
+        send(postStatus, postStatus === 202 ? postBody : { error: "folderPath 必须是字符串" });
       });
       return;
+    }
+    if (req.url?.startsWith("/api/agent-notes")) {
+      noteQueries.push(new URL(req.url, "http://x").search);
+      return send(200, agentNotes);
+    }
+    if (req.method === "DELETE" && req.url?.startsWith("/api/diagrams/")) {
+      deletes.push(decodeURIComponent(req.url.slice("/api/diagrams/".length)));
+      return send(deleteResult.status, deleteResult.body);
     }
     send(404, { error: "not found" });
   });
@@ -106,5 +124,52 @@ describe("importDiagram", () => {
   it("surfaces the service's own rejection message", async () => {
     postStatus = 400;
     await expect(importDiagram(base, diagram)).rejects.toThrow("folderPath 必须是字符串");
+  });
+
+  it("returns the id Mermaid Local gave the note", async () => {
+    expect(await importDiagram(base, diagram)).toEqual({ id: "note-1" });
+  });
+
+  it("says to restart the sync service when it accepts the note but returns no id", async () => {
+    postBody = { ok: true };
+    await expect(importDiagram(base, diagram)).rejects.toThrow(/没有返回笔记 id.*重启/);
+  });
+});
+
+describe("listAgentNotes", () => {
+  const note = { id: "n1", name: "排序", type: "html", projectName: "LLM", folderPath: "", createdAt: 1, status: "present" };
+
+  it("returns the notes the agent saved", async () => {
+    agentNotes = { count: 1, notes: [note] };
+    expect(await listAgentNotes(base)).toEqual([note]);
+    expect(noteQueries).toEqual([""]);
+  });
+
+  it("passes the title and type filters through", async () => {
+    await listAgentNotes(base, { query: "排序 算法", type: "html" });
+    expect(new URLSearchParams(noteQueries[0]).get("q")).toBe("排序 算法");
+    expect(new URLSearchParams(noteQueries[0]).get("type")).toBe("html");
+  });
+
+  it("complains about a response it cannot read instead of returning garbage", async () => {
+    agentNotes = { notes: [{ id: "n1" }] };
+    await expect(listAgentNotes(base)).rejects.toBeInstanceOf(MermaidLocalError);
+  });
+});
+
+describe("deleteAgentNote", () => {
+  it("asks the service to delete the note by id, authenticated, and reports it as queued", async () => {
+    expect(await deleteAgentNote(base, "a/b c")).toBe("queued");
+    expect(deletes).toEqual(["a/b c"]);
+  });
+
+  it("reports a note that never left the inbox as cancelled", async () => {
+    deleteResult = { status: 200, body: { ok: true } };
+    expect(await deleteAgentNote(base, "n1")).toBe("cancelled");
+  });
+
+  it("surfaces the refusal for a note it did not write", async () => {
+    deleteResult = { status: 403, body: { error: "只能删除经 Agent 写回的笔记" } };
+    await expect(deleteAgentNote(base, "n1")).rejects.toThrow("只能删除经 Agent 写回的笔记");
   });
 });

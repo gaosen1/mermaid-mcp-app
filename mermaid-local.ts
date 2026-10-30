@@ -76,12 +76,72 @@ export interface DiagramImport {
   target: ImportTarget;
 }
 
-/** Drops a note into Mermaid Local's inbox; the open page (or the next page load) imports it. */
-export async function importDiagram(base: string, { name, type, source, target }: DiagramImport): Promise<void> {
+/**
+ * Drops a note into Mermaid Local's inbox; the open page (or the next page load) imports it.
+ * Returns the id the note will have there, which is what `deleteAgentNote` takes.
+ */
+export async function importDiagram(base: string, { name, type, source, target }: DiagramImport): Promise<{ id: string }> {
   const res = await request(base, "/api/diagrams", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(await authHeader(base)) },
     body: JSON.stringify({ name, type, source, projectName: target.project, folderPath: target.folderPath }),
   });
   if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "导入失败"));
+  const body = (await res.json().catch(() => ({}))) as { id?: unknown };
+  if (typeof body.id !== "string") {
+    // An agent-api older than the delete tool accepts the note but cannot say what to call it.
+    throw new MermaidLocalError(`笔记已投递，但同步服务没有返回笔记 id（它可能还是旧版本）。${SETUP_HINT}重启它之后再试。`);
+  }
+  return { id: body.id };
+}
+
+export interface AgentNote {
+  id: string;
+  name: string;
+  type: string;
+  projectName: string | null;
+  folderPath: string | null;
+  createdAt: number;
+  /** `pending`: still queued in Mermaid Local's inbox; `present`: imported. */
+  status: "pending" | "present";
+}
+
+const agentNotesSchema = z.object({
+  notes: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      type: z.string(),
+      projectName: z.string().nullable(),
+      folderPath: z.string().nullable(),
+      createdAt: z.number(),
+      status: z.enum(["pending", "present"]),
+    }),
+  ),
+});
+
+/** Notes that were written into Mermaid Local through this server (and so may be deleted through it), newest first. */
+export async function listAgentNotes(base: string, filter: { query?: string; type?: string } = {}): Promise<AgentNote[]> {
+  const params = new URLSearchParams();
+  if (filter.query) params.set("q", filter.query);
+  if (filter.type) params.set("type", filter.type);
+  const qs = params.size > 0 ? `?${params}` : "";
+  const res = await request(base, `/api/agent-notes${qs}`, { headers: await authHeader(base) });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "读取已保存的笔记失败"));
+  const parsed = agentNotesSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) throw new MermaidLocalError(`同步服务返回的笔记列表格式不对（它可能是旧版本）。${SETUP_HINT}`);
+  return parsed.data.notes;
+}
+
+/**
+ * Deletes a note this server wrote earlier. `cancelled`: it was still queued and never reached Mermaid Local;
+ * `queued`: the delete is waiting for the open page (or the next page load) to carry it out.
+ */
+export async function deleteAgentNote(base: string, id: string): Promise<"cancelled" | "queued"> {
+  const res = await request(base, `/api/diagrams/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: await authHeader(base),
+  });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "删除失败"));
+  return res.status === 200 ? "cancelled" : "queued";
 }
