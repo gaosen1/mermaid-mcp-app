@@ -28,14 +28,19 @@ import {
   listAgentNotes,
   listTargets,
   MermaidLocalError,
+  organizeProject,
+  readLibrary,
   readNote,
   resolveNote,
   updateNote,
   waitForCommand,
   type AgentNote,
+  type LibraryItem,
   type NoteUpdate,
+  type OrganizeAction,
 } from "./mermaid-local.js";
 import { bakeInitialState } from "./bake.js";
+import { renderLibrary } from "./library-outline.js";
 import { NoteSourceError, readNoteSource, type NoteSource } from "./note-source.js";
 import { createRenderStore } from "./renders.js";
 import { CONTENT_TYPES } from "./src/content-type.js";
@@ -230,6 +235,41 @@ async function updateNoteForModel(
   }
 }
 
+interface LibraryOutcome extends ToolOutcome {
+  projects?: { name: string; items: LibraryItem[] }[];
+}
+
+async function readLibraryForModel(project: string | undefined): Promise<LibraryOutcome> {
+  try {
+    const all = await readLibrary(loadConfig().agentApiBaseUrl);
+    const projects = project === undefined ? all : all.filter((p) => p.name === project);
+    if (project !== undefined && projects.length === 0) {
+      return { ok: false, message: `找不到项目「${project}」。现有项目：${all.map((p) => p.name).join("、") || "（没有）"}` };
+    }
+    return { ok: true, projects, message: renderLibrary(projects) };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
+/** Submits a batch of reorganization steps and reports what the page did with them. */
+async function organizeForModel(project: string, actions: OrganizeAction[]): Promise<ToolOutcome> {
+  try {
+    const { agentApiBaseUrl } = loadConfig();
+    const queued = await organizeProject(agentApiBaseUrl, project, actions);
+    if (!queued.pageOpen) {
+      return { ok: true, message: `已提交整理「${project}」的 ${actions.length} 个动作：Mermaid Local 页面没开，下次打开时执行；执行时如果有一步不合法，整批都不会改。` };
+    }
+    const outcome = await waitForCommand(agentApiBaseUrl, queued.commandId!);
+    if (outcome === null) {
+      return { ok: true, message: `已提交整理「${project}」，但还没等到 Mermaid Local 页面确认；稍后用 get_library_tree 看现在的结构。` };
+    }
+    return { ok: outcome.status === "applied", message: outcome.message };
+  } catch (err) {
+    return failure(err);
+  }
+}
+
 /** Lists the notes this server saved into Mermaid Local, so one of them can be picked for deletion. */
 async function listSavedNotes(query: string | undefined, type: string | undefined): Promise<ToolOutcome & { notes: AgentNote[] }> {
   try {
@@ -369,6 +409,25 @@ When to call this: the user asks you to change, fix or update a specific note ("
 Send the note's COMPLETE new content, not a patch. Pass it as \`path\` (an absolute path to a local file — preferred, costs no tokens) or \`content\` (inline). For an HTML note use a .html file or inline HTML. The note's type cannot change, and image notes cannot be edited. \`title\` renames it.
 
 The edit is carried out by the open Mermaid Local page; the result says whether it was applied, refused (the note changed since you read it) or is waiting for the page to be opened.`;
+
+const GET_LIBRARY_TREE_DESCRIPTION = `Show how the user's Mermaid Local notes are organized: every project (or just one) as an outline of folders and notes, in the order the app displays them (folders and notes are mixed at each level). Folders are shown with their full path ("算法/排序/"), notes with their type, title and id (first 8 characters).
+
+Use it before organize_notes — you need the current structure, the folder paths and the note ids. It is as of Mermaid Local's last sync (a couple of seconds behind the page).`;
+
+const ORGANIZE_NOTES_DESCRIPTION = `Reorganize the notes of ONE Mermaid Local project: create, rename and move folders, move notes into folders, and change the order of items. This is the user's own library, so it is only for when they ask for it ("把这些笔记按主题分组", "把排序相关的放到一个文件夹", "按时间重排").
+
+Call get_library_tree first. Then send all the steps as one batch in \`actions\`, run in order (a later step sees the effect of earlier ones, e.g. create a folder and then move notes into it). The batch is checked as a whole: if any step is invalid NOTHING is changed and you are told which step and why — fix it and send the batch again.
+
+Steps (folder paths are inside the project, "a/b"; an empty path "" is the project root):
+- {op:"create_folder", path} — creates the missing folders of the path; fine if it exists.
+- {op:"rename_folder", path, name} — name is a single folder name, no "/".
+- {op:"move_folder", path, to} — to = new parent path ("" = root); created if missing. Appended at the end.
+- {op:"move_notes", notes:[id...], to} — note ids (or 6+ character id prefixes) from get_library_tree; to = target folder ("" = root), created if missing. Appended at the end in the order given.
+- {op:"reorder", in, order:[{note:id}|{folder:name}...]} — within one folder; the listed items come first in that order, the rest follow in their current order.
+
+Not possible on purpose: deleting folders or notes, moving notes to another project, editing a note's content (use update_note). For a big restructuring, tell the user your plan (what goes where) before you run it, unless they already told you exactly what to do. Folders are matched by name, so two sibling folders with the same name cannot be addressed — the step is refused.
+
+The change is carried out by the open Mermaid Local page, and the tool waits for its answer.`;
 
 const LIST_AGENT_NOTES_DESCRIPTION = `List the notes that were saved into the user's Mermaid Local through this server (save_html_note, or the viewer's "→ Mermaid Local" button), newest first, with their ids. Notes the user wrote themselves are never listed.
 
@@ -540,6 +599,57 @@ export function createServer(): McpServer {
     },
     async ({ note, baseHash, title, path: file, content }): Promise<CallToolResult> => {
       const result = await updateNoteForModel(note, { path: file, text: content }, title, baseHash);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  server.registerTool(
+    "get_library_tree",
+    {
+      title: "Show how Mermaid Local notes are organized",
+      description: GET_LIBRARY_TREE_DESCRIPTION,
+      inputSchema: z.object({
+        project: z.string().trim().min(1).optional().describe("Only this project (by name); omit for every project"),
+      }),
+      outputSchema: z.object({
+        ok: z.boolean(),
+        message: z.string(),
+        projects: z.array(z.object({ name: z.string(), items: z.array(z.any()) })).optional(),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ project }): Promise<CallToolResult> => {
+      const result = await readLibraryForModel(project);
+      return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
+    },
+  );
+
+  const organizeActionSchema = z.discriminatedUnion("op", [
+    z.object({ op: z.literal("create_folder"), path: z.string() }),
+    z.object({ op: z.literal("rename_folder"), path: z.string(), name: z.string() }),
+    z.object({ op: z.literal("move_folder"), path: z.string(), to: z.string() }),
+    z.object({ op: z.literal("move_notes"), notes: z.array(z.string()).min(1), to: z.string() }),
+    z.object({
+      op: z.literal("reorder"),
+      in: z.string(),
+      order: z.array(z.union([z.object({ note: z.string() }).strict(), z.object({ folder: z.string() }).strict()])).min(1),
+    }),
+  ]);
+
+  server.registerTool(
+    "organize_notes",
+    {
+      title: "Reorganize a Mermaid Local project",
+      description: ORGANIZE_NOTES_DESCRIPTION,
+      inputSchema: z.object({
+        project: z.string().trim().min(1, "project must be the project's name").describe("Name of the project to reorganize"),
+        actions: z.array(organizeActionSchema).min(1).describe("The steps, run in order as one all-or-nothing batch"),
+      }),
+      outputSchema: z.object({ ok: z.boolean(), message: z.string() }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ project, actions }): Promise<CallToolResult> => {
+      const result = await organizeForModel(project, actions);
       return { content: [{ type: "text", text: result.message }], structuredContent: { ...result }, isError: !result.ok };
     },
   );

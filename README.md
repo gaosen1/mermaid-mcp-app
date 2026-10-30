@@ -31,10 +31,10 @@ Enable once: **Claude menu → Help → Troubleshooting → Enable Developer Mod
 
 | File | Role |
 |---|---|
-| `server.ts` | MCP server: registers `render_mermaid` (+ its `ui://mermaid/viewer-*` UI resource), `save_html_note`, `read_note` / `update_note`, `list_agent_notes` / `delete_agent_note`, and the app-only import / target-picker tools |
+| `server.ts` | MCP server: registers `render_mermaid` (+ its `ui://mermaid/viewer-*` UI resource), `save_html_note`, `read_note` / `update_note`, `get_library_tree` / `organize_notes`, `list_agent_notes` / `delete_agent_note`, and the app-only import / target-picker tools |
 | `renders.ts` | On-disk store for each render (`<id>.mmd` / `<id>.md` + `<id>.json` sidecar) |
 | `bake.ts` | Injects a render's state into the viewer HTML for the per-call page |
-| `mermaid-local.ts` | Client for Mermaid Local's `agent-api` (list projects/folders, import a diagram, resolve / read / update any note, list / delete the notes it saved) |
+| `mermaid-local.ts` | Client for Mermaid Local's `agent-api` (list projects/folders, import a diagram, resolve / read / update any note, read the library tree and organize a project, list / delete the notes it saved) |
 | `note-source.ts` | Reads note content for `save_html_note` / `update_note` from inline text or a local `path`, with size/shape checks |
 | `config.ts` / `configure.mjs` | Persisted import target + agent-api URL, and the CLI that edits them |
 | `main.ts` | Process entry point — stdio transport by default (what Claude Desktop uses), `--http` for local testing |
@@ -126,6 +126,18 @@ URL, history and place in the folder tree. So notes can be changed in place:
 
 The edit is carried out by the open Mermaid Local page, and the tool waits for its answer (a few seconds), so an
 applied / refused result is real rather than assumed. If no page is open, the edit waits for the next time one is.
+
+### Organizing a project
+
+`get_library_tree` shows how the library is laid out — each project as an outline of folders (with their full paths)
+and notes (type, title, short id), in the order the app displays them. `organize_notes` then changes it, for one project
+per call: create / rename / move folders, move notes into folders, and reorder items within a folder. The steps go in as
+one batch that is checked as a whole — if any step is invalid **nothing** is changed and the model is told which step and
+why — and the open Mermaid Local page carries it out (and the sidebar updates live).
+
+Deliberately not possible: deleting folders or notes (the app does not yet sync folder deletions to the cloud, so a
+deleted folder would come back), moving notes to another project, and changing a note's content (that is `update_note`).
+The tool description tells the model to explain its plan to you before a big restructuring.
 
 `list_agent_notes` and `delete_agent_note` remain for finding and removing notes. Deletion is scoped on purpose:
 Mermaid Local's `agent-api` keeps a ledger (`agent-notes.json` in the sync folder) of the notes written through it and

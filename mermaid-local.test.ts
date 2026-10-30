@@ -7,6 +7,8 @@ import {
   listAgentNotes,
   listTargets,
   MermaidLocalError,
+  organizeProject,
+  readLibrary,
   readNote,
   resolveNote,
   updateNote,
@@ -30,6 +32,8 @@ let updateResult: { status: number; body: unknown };
 let updates: Array<{ path: string; body: unknown }>;
 let commandStatuses: unknown[];
 let resolveRefs: string[];
+let organizeResult: { status: number; body: unknown };
+let organizeRequests: unknown[];
 
 beforeEach(async () => {
   manifest = { projects: [{ name: "LLM", folders: ["多模态", "多模态/对比学习"] }] };
@@ -50,6 +54,8 @@ beforeEach(async () => {
   updates = [];
   commandStatuses = [{ status: "pending" }, { status: "applied", message: "已更新" }];
   resolveRefs = [];
+  organizeResult = { status: 202, body: { ok: true, commandId: "cmd-org", notified: 1 } };
+  organizeRequests = [];
   server = http.createServer((req, res) => {
     const send = (code: number, payload: unknown) => {
       res.writeHead(code, { "Content-Type": "application/json" });
@@ -64,6 +70,15 @@ beforeEach(async () => {
       req.on("end", () => {
         posts.push({ auth: req.headers.authorization, body: JSON.parse(raw) });
         send(postStatus, postStatus === 202 ? postBody : { error: "folderPath 必须是字符串" });
+      });
+      return;
+    }
+    if (req.url === "/api/organize" && req.method === "POST") {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        organizeRequests.push(JSON.parse(raw));
+        send(organizeResult.status, organizeResult.body);
       });
       return;
     }
@@ -296,5 +311,48 @@ describe("waitForCommand", () => {
   it("gives up with null when the page never answers", async () => {
     commandStatuses = [{ status: "pending" }];
     expect(await waitForCommand(base, "cmd-1", { timeoutMs: 60, intervalMs: 10 })).toBeNull();
+  });
+});
+
+describe("readLibrary", () => {
+  const organization = [
+    { name: "算法笔记", items: [{ kind: "note", id: "n1", name: "Alpha", type: "html" }, { kind: "folder", name: "算法", items: [] }] },
+  ];
+
+  it("returns every project's tree from the manifest", async () => {
+    manifest = { projects: [], organization };
+    expect(await readLibrary(base)).toEqual(organization);
+  });
+
+  it("asks for a sync when the manifest has no tree yet (older page)", async () => {
+    manifest = { projects: [{ name: "LLM", folders: [] }] };
+    await expect(readLibrary(base)).rejects.toThrow(/还没有写出目录结构/);
+  });
+
+  it("explains that nothing has been synced yet", async () => {
+    manifestStatus = 404;
+    await expect(readLibrary(base)).rejects.toThrow(/还没有同步过/);
+  });
+});
+
+describe("organizeProject", () => {
+  const actions = [
+    { op: "create_folder" as const, path: "精选" },
+    { op: "reorder" as const, in: "", order: [{ note: "n1" }, { folder: "精选" }] },
+  ];
+
+  it("posts the project and the actions as given, and says whether a page will act on it", async () => {
+    expect(await organizeProject(base, "算法笔记", actions)).toEqual({ id: "算法笔记", commandId: "cmd-org", pageOpen: true });
+    expect(organizeRequests).toEqual([{ project: "算法笔记", actions }]);
+  });
+
+  it("surfaces the service's refusal (unknown project, unknown action)", async () => {
+    organizeResult = { status: 404, body: { error: "找不到项目「x」。现有项目：算法笔记" } };
+    await expect(organizeProject(base, "x", actions)).rejects.toThrow("现有项目：算法笔记");
+  });
+
+  it("complains about a response without a command id (older service)", async () => {
+    organizeResult = { status: 202, body: { ok: true } };
+    await expect(organizeProject(base, "算法笔记", actions)).rejects.toThrow(/旧版本/);
   });
 });

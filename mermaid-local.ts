@@ -221,12 +221,12 @@ export async function updateNote(base: string, ref: string, update: NoteUpdate):
 }
 
 export interface CommandOutcome {
-  status: "applied" | "conflict" | "missing" | "unsupported";
+  status: "applied" | "conflict" | "missing" | "unsupported" | "invalid";
   message: string;
 }
 
 const commandOutcomeSchema = z.object({
-  status: z.enum(["pending", "applied", "conflict", "missing", "unsupported"]),
+  status: z.enum(["pending", "applied", "conflict", "missing", "unsupported", "invalid"]),
   message: z.string().optional(),
 });
 
@@ -248,4 +248,64 @@ export async function waitForCommand(
     if (Date.now() + intervalMs >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+}
+
+/** One entry of a project's tree: a folder (with what is inside it) or a note. Same-level order is the order the app shows. */
+export type LibraryItem =
+  | { kind: "folder"; name: string; items: LibraryItem[] }
+  | { kind: "note"; id: string; name: string; type: string };
+
+export interface LibraryProject {
+  name: string;
+  items: LibraryItem[];
+}
+
+const libraryItemSchema: z.ZodType<LibraryItem> = z.lazy(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("folder"), name: z.string(), items: z.array(libraryItemSchema) }),
+    z.object({ kind: z.literal("note"), id: z.string(), name: z.string(), type: z.string() }),
+  ]),
+);
+
+const libraryManifestSchema = z.object({
+  organization: z.array(z.object({ name: z.string(), items: z.array(libraryItemSchema) })),
+});
+
+/** Every project's folders and notes as Mermaid Local last synced them (from the manifest). */
+export async function readLibrary(base: string): Promise<LibraryProject[]> {
+  const res = await request(base, "/api/manifest", { headers: await authHeader(base) });
+  if (res.status === 404) throw new MermaidLocalError(`Mermaid Local 还没有同步过。${SETUP_HINT}`);
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "读取目录结构失败"));
+  const parsed = libraryManifestSchema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) {
+    throw new MermaidLocalError(
+      `Mermaid Local 还没有写出目录结构。请打开 Mermaid Local 页面让它同步一次（它可能是旧版本，需要重新构建 / 重启）。${SETUP_HINT}`,
+    );
+  }
+  return parsed.data.organization;
+}
+
+export type OrganizeItemRef = { note: string } | { folder: string };
+
+/** One step of a reorganization; paths are folder paths inside the project ("a/b"), an empty path is the project root. */
+export type OrganizeAction =
+  | { op: "create_folder"; path: string }
+  | { op: "rename_folder"; path: string; name: string }
+  | { op: "move_folder"; path: string; to: string }
+  | { op: "move_notes"; notes: string[]; to: string }
+  | { op: "reorder"; in: string; order: OrganizeItemRef[] };
+
+/** Submits a batch of reorganization steps for one project. The page checks them all and applies all or none; see `waitForCommand`. */
+export async function organizeProject(base: string, project: string, actions: OrganizeAction[]): Promise<QueuedUpdate> {
+  const res = await request(base, "/api/organize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeader(base)) },
+    body: JSON.stringify({ project, actions }),
+  });
+  if (!res.ok) throw new MermaidLocalError(await failureMessage(res, "整理失败"));
+  const body = (await res.json().catch(() => ({}))) as { commandId?: unknown; notified?: unknown };
+  if (typeof body.commandId !== "string") {
+    throw new MermaidLocalError(`同步服务的响应里没有指令 id（它可能是旧版本）。${SETUP_HINT}`);
+  }
+  return { id: project, commandId: body.commandId, pageOpen: typeof body.notified === "number" && body.notified > 0 };
 }
